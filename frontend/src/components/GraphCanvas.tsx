@@ -89,6 +89,7 @@ export function GraphCanvas({
 }: Props) {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [hovered, setHovered] = useState<GraphNode | null>(null);
+  const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
   const normalizedSearch = search.trim().toLowerCase();
 
   const visibleEdgeTypes = useMemo(() => {
@@ -124,36 +125,88 @@ export function GraphCanvas({
     };
   }, [graph, visibleEdgeTypes]);
 
-  const visibleGraph = useMemo(() => {
-    if (!filteredGraph || !normalizedSearch) return filteredGraph;
-    const matching = new Set(
+  const graphContext = useMemo(() => {
+    const tiers = new Map<string, "primary" | "neighbor" | "context">();
+    if (!filteredGraph) {
+      return { graph: filteredGraph, tiers };
+    }
+
+    const existingIds = new Set(filteredGraph.nodes.map((node) => node.id));
+    const primaryIds = new Set<string>();
+    if (focusedNodeId && existingIds.has(focusedNodeId)) {
+      primaryIds.add(focusedNodeId);
+    } else if (normalizedSearch) {
       filteredGraph.nodes
         .filter((node) => node.name.toLowerCase().includes(normalizedSearch))
-        .map((node) => node.id)
-    );
-    const connected = new Set(matching);
-    filteredGraph.edges.forEach((edge) => {
-      if (matching.has(edge.source)) connected.add(edge.target);
-      if (matching.has(edge.target)) connected.add(edge.source);
+        .forEach((node) => primaryIds.add(node.id));
+    }
+
+    if (primaryIds.size === 0) {
+      return { graph: filteredGraph, tiers };
+    }
+
+    const firstHopIds = new Set(primaryIds);
+    for (const edge of filteredGraph.edges) {
+      if (primaryIds.has(edge.source) || primaryIds.has(edge.target)) {
+        firstHopIds.add(edge.source);
+        firstHopIds.add(edge.target);
+      }
+    }
+
+    const secondHopIds = new Set(firstHopIds);
+    for (const edge of filteredGraph.edges) {
+      if (firstHopIds.has(edge.source) || firstHopIds.has(edge.target)) {
+        secondHopIds.add(edge.source);
+        secondHopIds.add(edge.target);
+      }
+    }
+
+    primaryIds.forEach((id) => tiers.set(id, "primary"));
+    firstHopIds.forEach((id) => {
+      if (!tiers.has(id)) tiers.set(id, "neighbor");
     });
+    secondHopIds.forEach((id) => {
+      if (!tiers.has(id)) tiers.set(id, "context");
+    });
+
     return {
-      ...filteredGraph,
-      nodes: filteredGraph.nodes.filter((node) => connected.has(node.id)),
-      edges: filteredGraph.edges.filter((edge) => connected.has(edge.source) && connected.has(edge.target))
+      graph: {
+        ...filteredGraph,
+        nodes: filteredGraph.nodes.filter((node) => secondHopIds.has(node.id)),
+        edges: filteredGraph.edges.filter((edge) => secondHopIds.has(edge.source) && secondHopIds.has(edge.target))
+      },
+      tiers
     };
-  }, [filteredGraph, normalizedSearch]);
+  }, [filteredGraph, focusedNodeId, normalizedSearch]);
+
+  const visibleGraph = graphContext.graph;
+  const contextTiers = graphContext.tiers;
+
+  useEffect(() => {
+    if (!focusedNodeId || !filteredGraph) return;
+    if (!filteredGraph.nodes.some((node) => node.id === focusedNodeId)) {
+      setFocusedNodeId(null);
+    }
+  }, [filteredGraph, focusedNodeId]);
 
   const nodeNames = useMemo(() => {
     return new Map((visibleGraph?.nodes ?? []).map((node) => [node.id, node.name]));
   }, [visibleGraph]);
 
+  const focusedNode = useMemo(() => {
+    if (!focusedNodeId) return null;
+    return visibleGraph?.nodes.find((node) => node.id === focusedNodeId) ?? null;
+  }, [focusedNodeId, visibleGraph]);
+
+  const tooltipNode = hovered ?? focusedNode;
+
   const hoveredEdges = useMemo(() => {
-    if (!visibleGraph || !hovered) return [];
+    if (!visibleGraph || !tooltipNode) return [];
     return visibleGraph.edges
-      .filter((edge) => edge.source === hovered.id || edge.target === hovered.id)
+      .filter((edge) => edge.source === tooltipNode.id || edge.target === tooltipNode.id)
       .sort((left, right) => edgeTypePriority(left.type) - edgeTypePriority(right.type) || right.weight - left.weight)
       .slice(0, 5);
-  }, [hovered, visibleGraph]);
+  }, [tooltipNode, visibleGraph]);
 
   useEffect(() => {
     const svg = svgRef.current;
@@ -186,6 +239,10 @@ export function GraphCanvas({
           zoomLayer.attr("transform", event.transform.toString());
         })
     );
+    root.on("click", () => {
+      setFocusedNodeId(null);
+      setHovered(null);
+    });
 
     const link = linkLayer
       .selectAll("line")
@@ -203,13 +260,43 @@ export function GraphCanvas({
       .attr(
         "class",
         (item) =>
-          `graph-node ${item.isShared ? "shared" : ""} ${item.isSimilarOnly ? "similar" : ""}`
+          `graph-node ${item.isShared ? "shared" : ""} ${item.isSimilarOnly ? "similar" : ""} ${item.isCatalogOnly ? "catalog" : ""}`
       );
+
+    function applyContext() {
+      if (contextTiers.size === 0) {
+        link.classed("is-highlighted", false).classed("is-context", false).classed("is-dimmed", false);
+        node
+          .classed("is-highlighted", false)
+          .classed("is-neighbor", false)
+          .classed("is-context", false)
+          .classed("is-dimmed", false);
+        return;
+      }
+
+      link
+        .classed("is-highlighted", (edge) => {
+          const sourceTier = contextTiers.get(endpointId(edge.source));
+          const targetTier = contextTiers.get(endpointId(edge.target));
+          return sourceTier === "primary" || targetTier === "primary";
+        })
+        .classed("is-context", (edge) => {
+          const sourceTier = contextTiers.get(endpointId(edge.source));
+          const targetTier = contextTiers.get(endpointId(edge.target));
+          return Boolean(sourceTier && targetTier && sourceTier !== "primary" && targetTier !== "primary");
+        })
+        .classed("is-dimmed", false);
+
+      node
+        .classed("is-highlighted", (item) => contextTiers.get(item.id) === "primary")
+        .classed("is-neighbor", (item) => contextTiers.get(item.id) === "neighbor")
+        .classed("is-context", (item) => contextTiers.get(item.id) === "context")
+        .classed("is-dimmed", false);
+    }
 
     function focusNode(focused: SimNode | null) {
       if (!focused) {
-        link.classed("is-highlighted", false).classed("is-dimmed", false);
-        node.classed("is-highlighted", false).classed("is-neighbor", false).classed("is-dimmed", false);
+        applyContext();
         return;
       }
 
@@ -230,6 +317,7 @@ export function GraphCanvas({
       node
         .classed("is-highlighted", (item) => item.id === focused.id)
         .classed("is-neighbor", (item) => item.id !== focused.id && connectedIds.has(item.id))
+        .classed("is-context", false)
         .classed("is-dimmed", (item) => !connectedIds.has(item.id));
     }
 
@@ -241,6 +329,13 @@ export function GraphCanvas({
       setHovered(null);
       focusNode(null);
     });
+    node.on("click", (event, item) => {
+      event.stopPropagation();
+      setFocusedNodeId((current) => (current === item.id ? null : item.id));
+      setHovered(item);
+    });
+
+    applyContext();
 
     const avatarNodes = nodes.filter((item) => Boolean(item.image));
     const clips = defs
@@ -372,7 +467,7 @@ export function GraphCanvas({
       }
       simulation.stop();
     };
-  }, [repulsionStrength, visibleGraph]);
+  }, [contextTiers, repulsionStrength, visibleGraph]);
 
   if (!graph) {
     return (
@@ -397,28 +492,40 @@ export function GraphCanvas({
 
   return (
     <section className="graph-stage">
+      {(normalizedSearch || focusedNodeId) && (
+        <div className="graph-focus-hint">
+          <strong>{focusedNodeId ? "Фокус на артисте" : "Режим поиска"}</strong>
+          <span>Видны ближайшие связи и следующий слой. Клик по артисту раскрывает граф вокруг него.</span>
+          {focusedNodeId && (
+            <button type="button" onClick={() => setFocusedNodeId(null)}>
+              Снять фокус
+            </button>
+          )}
+        </div>
+      )}
       <svg ref={svgRef} role="img" aria-label="music artist graph" />
-      {hovered && (
+      {tooltipNode && (
         <div className="graph-tooltip">
-          <strong>{hovered.name}</strong>
-          {typeof hovered.knownTrackCount === "number" ? (
-            <span>{hovered.knownTrackCount} знакомых треков в Яндексе</span>
-          ) : hovered.isSimilarOnly || hovered.isCatalogOnly ? (
+          <strong>{tooltipNode.name}</strong>
+          {typeof tooltipNode.knownTrackCount === "number" ? (
+            <span>{tooltipNode.knownTrackCount} знакомых треков в Яндексе</span>
+          ) : tooltipNode.isSimilarOnly || tooltipNode.isCatalogOnly ? (
             <span>Яндекс не отдал личную статистику для этого артиста</span>
           ) : (
-            <span>{hovered.listenCount} синхронизированных прослушиваний</span>
+            <span>{tooltipNode.listenCount} синхронизированных прослушиваний</span>
           )}
-          {typeof hovered.waveTrackCount === "number" && <span>{hovered.waveTrackCount} из волны/прослушиваний</span>}
-          {typeof hovered.collectionTrackCount === "number" && <span>{hovered.collectionTrackCount} в коллекции</span>}
-          {shouldShowLocalTrackCount(hovered) && <span>{hovered.trackCount} треков в локальном графе</span>}
-          {hovered.isLikedArtist && <span>Лайкнутый артист</span>}
-          {hovered.isSimilarOnly && <span>Похожий артист</span>}
-          {hovered.isShared && <span className="shared-pill">Общий артист</span>}
+          {typeof tooltipNode.waveTrackCount === "number" && <span>{tooltipNode.waveTrackCount} из волны/прослушиваний</span>}
+          {typeof tooltipNode.collectionTrackCount === "number" && <span>{tooltipNode.collectionTrackCount} в коллекции</span>}
+          {shouldShowLocalTrackCount(tooltipNode) && <span>{tooltipNode.trackCount} треков в локальном графе</span>}
+          {tooltipNode.isLikedArtist && <span>Лайкнутый артист</span>}
+          {tooltipNode.isSimilarOnly && <span>Похожий артист</span>}
+          {tooltipNode.isShared && <span className="shared-pill">Общий артист</span>}
+          {focusedNodeId === tooltipNode.id && <span className="shared-pill focus-pill">Фокус графа</span>}
           {hoveredEdges.length > 0 && (
             <div className="tooltip-links">
               <span className="tooltip-links-title">Связи на графе</span>
               {hoveredEdges.map((edge) => {
-                const otherId = edge.source === hovered.id ? edge.target : edge.source;
+                const otherId = edge.source === tooltipNode.id ? edge.target : edge.source;
                 const tracks = edge.tracks.filter((track) => track.trim()).slice(0, 3);
                 return (
                   <span className="tooltip-link" key={graphEdgeKey(edge)}>

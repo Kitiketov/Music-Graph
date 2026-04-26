@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     familiar_source_limit: int = 320
     familiar_neighbor_source_limit: int = 90
     deep_familiar_source_limit: int = 60
+    familiar_wave_tracks_limit: int = 100
+    familiar_collection_tracks_limit: int = 100
+    familiar_collection_albums_limit: int = 20
     catalog_collab_source_limit: int = 18
     deep_catalog_collab_source_limit: int = 18
     catalog_tracks_page_size: int = 100

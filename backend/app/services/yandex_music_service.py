@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -10,6 +10,8 @@ from threading import local
 from typing import Any
 
 from app.core.config import settings
+
+ProgressReporter = Callable[[str, int, str, dict[str, str]], None]
 
 
 @dataclass
@@ -55,6 +57,12 @@ class ArtistFamiliarSnapshot:
     collection_track_count: int = 0
     collection_album_count: int = 0
     raw: dict = field(default_factory=dict)
+
+
+@dataclass
+class ArtistFamiliarFetch:
+    familiar: ArtistFamiliarSnapshot
+    tracks: list[TrackSnapshot] = field(default_factory=list)
 
 
 @dataclass
@@ -303,8 +311,8 @@ def _liked_artists_from_likes(likes: Any) -> list[LikedArtistSnapshot]:
 def _dedupe_tracks(tracks: Iterable[TrackSnapshot]) -> list[TrackSnapshot]:
     seen: set[tuple[str, str, str | None]] = set()
     result: list[TrackSnapshot] = []
-    for index, track in enumerate(tracks):
-        played = track.played_at.isoformat() if track.played_at else str(index)
+    for track in tracks:
+        played = track.played_at.isoformat() if track.played_at else None
         key = (track.id, track.source, played)
         if key in seen:
             continue
@@ -381,15 +389,31 @@ def _int_field(value: Any, name: str) -> int:
     return 0
 
 
+def _section_track_count(value: Any) -> int:
+    explicit_count = _int_field(value, "trackCount")
+    if explicit_count:
+        return explicit_count
+    return len({track.id for track in _extract_tracks(_field(value, "tracks", value), source="familiar_count")})
+
+
+def _section_album_count(value: Any) -> int:
+    explicit_count = _int_field(value, "albumCount")
+    if explicit_count:
+        return explicit_count
+    albums = _field(value, "albums", []) or []
+    if isinstance(albums, list | tuple | set):
+        return len(albums)
+    return 0
+
+
 def _artist_familiar_from_info(artist_id: str, value: Any) -> ArtistFamiliarSnapshot | None:
-    raw = _raw_dict(value)
     wave = _field(value, "wave", {}) or {}
     collection = _field(value, "collection", {}) or {}
-    wave_track_count = _int_field(wave, "trackCount")
-    collection_track_count = _int_field(collection, "trackCount")
-    collection_album_count = _int_field(collection, "albumCount")
+    wave_track_count = _section_track_count(wave)
+    collection_track_count = _section_track_count(collection)
+    collection_album_count = _section_album_count(collection)
     known_track_count = wave_track_count + collection_track_count
-    if known_track_count == 0 and collection_album_count == 0 and not raw:
+    if known_track_count == 0 and collection_album_count == 0 and not _raw_dict(value):
         return None
     return ArtistFamiliarSnapshot(
         artist_id=artist_id,
@@ -397,16 +421,59 @@ def _artist_familiar_from_info(artist_id: str, value: Any) -> ArtistFamiliarSnap
         wave_track_count=wave_track_count,
         collection_track_count=collection_track_count,
         collection_album_count=collection_album_count,
-        raw=raw,
+        raw={
+            "wave": {"trackCount": wave_track_count},
+            "collection": {
+                "trackCount": collection_track_count,
+                "albumCount": collection_album_count,
+            },
+        },
     )
 
 
-def _fetch_artist_familiar(client: Any, artist_id: str) -> ArtistFamiliarSnapshot | None:
+def _familiar_tracks_from_payload(value: Any) -> list[TrackSnapshot]:
+    wave = _field(value, "wave", {}) or {}
+    collection = _field(value, "collection", {}) or {}
+    return _dedupe_tracks(
+        [
+            *_extract_tracks(wave, source="familiar_wave"),
+            *_extract_tracks(collection, source="familiar_collection"),
+        ]
+    )
+
+
+def _fetch_artist_familiar_info(client: Any, artist_id: str) -> Any:
     response = client._request.get(
         f"{client.base_url}/artists/{artist_id}/familiar-you/info"
         "?withWaveInfo=true&withCollectionInfo=true"
     )
-    return _artist_familiar_from_info(artist_id, response)
+    return response
+
+
+def _fetch_artist_familiar_payload(client: Any, artist_id: str) -> Any:
+    return client._request.get(
+        f"{client.base_url}/artists/{artist_id}/familiar-you"
+        f"?waveTracksLimit={settings.familiar_wave_tracks_limit}"
+        f"&collectionTracksLimit={settings.familiar_collection_tracks_limit}"
+        f"&collectionAlbumsLimit={settings.familiar_collection_albums_limit}"
+    )
+
+
+def _fetch_artist_familiar_with_tracks(client: Any, artist_id: str) -> ArtistFamiliarFetch | None:
+    try:
+        response = _fetch_artist_familiar_payload(client, artist_id)
+    except Exception:  # noqa: BLE001
+        response = _fetch_artist_familiar_info(client, artist_id)
+
+    familiar = _artist_familiar_from_info(artist_id, response)
+    if familiar is None:
+        return None
+    return ArtistFamiliarFetch(familiar=familiar, tracks=_familiar_tracks_from_payload(response))
+
+
+def _fetch_artist_familiar(client: Any, artist_id: str) -> ArtistFamiliarSnapshot | None:
+    result = _fetch_artist_familiar_with_tracks(client, artist_id)
+    return result.familiar if result else None
 
 
 def _catalog_collabs_from_tracks(
@@ -480,6 +547,14 @@ def _similar_from_artist(client: Any, artist_id: str) -> list[SimilarArtistSnaps
     return [SimilarArtistSnapshot(source_artist_id=artist_id, artist=artist) for artist in extracted]
 
 
+def _listen_counts_from_tracks(tracks: Iterable[TrackSnapshot]) -> dict[str, int]:
+    listen_counts: dict[str, int] = {}
+    for track in tracks:
+        for artist in track.artists:
+            listen_counts[artist.id] = listen_counts.get(artist.id, 0) + 1
+    return listen_counts
+
+
 def _mock_snapshot() -> ListeningSnapshot:
     artists = [
         ArtistSnapshot("a1", "Noize MC"),
@@ -523,7 +598,7 @@ def _mock_snapshot() -> ListeningSnapshot:
     )
 
 
-def _fetch_snapshot_sync(token: str) -> ListeningSnapshot:
+def _fetch_snapshot_sync(token: str, progress_reporter: ProgressReporter | None = None) -> ListeningSnapshot:
     from yandex_music import Client
 
     sync_started_at = time.perf_counter()
@@ -540,7 +615,13 @@ def _fetch_snapshot_sync(token: str) -> ListeningSnapshot:
             worker_state.client = thread_client
         return thread_client
 
+    def report(stage_key: str, progress: int, message: str) -> None:
+        if progress_reporter is None:
+            return
+        progress_reporter(stage_key, progress, message, dict(source_status))
+
     stage_started_at = time.perf_counter()
+    report("liked_tracks", 15, "Смотрим лайкнутые треки")
     try:
         liked = client.users_likes_tracks()
         liked_tracks = _tracks_from_likes(liked)
@@ -548,14 +629,17 @@ def _fetch_snapshot_sync(token: str) -> ListeningSnapshot:
         source_status["liked_tracks"] = _elapsed_status(f"ok: {len(liked_tracks)} tracks", stage_started_at)
     except Exception as exc:  # noqa: BLE001
         source_status["liked_tracks"] = _elapsed_status(f"failed: {exc}", stage_started_at)
+    report("liked_tracks", 22, "Лайкнутые треки разобраны")
 
     stage_started_at = time.perf_counter()
+    report("liked_artists", 24, "Смотрим любимых исполнителей")
     try:
         raw_liked_artists = client.users_likes_artists()
         liked_artists = _liked_artists_from_likes(raw_liked_artists)
         source_status["liked_artists"] = _elapsed_status(f"ok: {len(liked_artists)} artists", stage_started_at)
     except Exception as exc:  # noqa: BLE001
         source_status["liked_artists"] = _elapsed_status(f"failed: {exc}", stage_started_at)
+    report("liked_artists", 28, "Любимые исполнители загружены")
 
     history_started_at = time.perf_counter()
     history = None
@@ -564,12 +648,14 @@ def _fetch_snapshot_sync(token: str) -> ListeningSnapshot:
     history_resolve_failures = 0
     history_tracks: list[TrackSnapshot] = []
     stage_started_at = time.perf_counter()
+    report("history_fetch", 30, "Смотрим историю прослушиваний")
     try:
         history = client.music_history()
         history_refs_count = len(_history_track_refs(history))
         source_status["history_fetch"] = _elapsed_status(f"ok: {history_refs_count} refs", stage_started_at)
     except Exception as exc:  # noqa: BLE001
         source_status["history_fetch"] = _elapsed_status(f"failed: {exc}", stage_started_at)
+    report("history_fetch", 34, "История получена, раскрываем треки")
 
     stage_started_at = time.perf_counter()
     if history is None:
@@ -601,8 +687,10 @@ def _fetch_snapshot_sync(token: str) -> ListeningSnapshot:
                 f"failed: {exc}",
                 time.perf_counter() - history_started_at,
             )
+    report("history_resolve", 40, "История прослушиваний разобрана")
 
     stage_started_at = time.perf_counter()
+    report("my_wave", 42, "Пробуем достать Мою волну")
     try:
         wave_items = client.music_history_items(wave_seeds=[["user:onyourwave"]])
         wave_tracks = _extract_tracks(wave_items, source="my_wave")
@@ -610,24 +698,37 @@ def _fetch_snapshot_sync(token: str) -> ListeningSnapshot:
         source_status["my_wave"] = _elapsed_status(f"ok: {len(wave_tracks)} tracks", stage_started_at)
     except Exception as exc:  # noqa: BLE001
         source_status["my_wave"] = _elapsed_status(f"failed: {exc}", stage_started_at)
+    report("my_wave", 45, "Моя волна проверена")
 
     tracks = _dedupe_tracks(tracks)
 
-    listen_counts: dict[str, int] = {}
-    artist_by_id: dict[str, ArtistSnapshot] = {}
-    for track in tracks:
-        for artist in track.artists:
-            artist_by_id[artist.id] = artist
-            listen_counts[artist.id] = listen_counts.get(artist.id, 0) + 1
+    listen_counts = _listen_counts_from_tracks(tracks)
+    known_track_ids = {track.id for track in tracks}
 
     familiar_by_artist_id: dict[str, ArtistFamiliarSnapshot] = {}
     known_counts: dict[str, int] = {}
+
+    def add_familiar_tracks(familiar_tracks: Iterable[TrackSnapshot]) -> int:
+        added = 0
+        for track in familiar_tracks:
+            if track.id in known_track_ids:
+                continue
+            known_track_ids.add(track.id)
+            tracks.append(track)
+            added += 1
+        return added
 
     def store_familiar(familiar: ArtistFamiliarSnapshot | None) -> None:
         if familiar is None:
             return
         familiar_by_artist_id[familiar.artist_id] = familiar
         known_counts[familiar.artist_id] = familiar.known_track_count
+
+    def store_familiar_fetch(fetch: ArtistFamiliarFetch | None) -> int:
+        if fetch is None:
+            return 0
+        store_familiar(fetch.familiar)
+        return add_familiar_tracks(fetch.tracks)
 
     familiar_base_seconds = 0.0
     familiar_neighbors_seconds = 0.0
@@ -644,30 +745,36 @@ def _fetch_snapshot_sync(token: str) -> ListeningSnapshot:
         ]
     )
     stage_started_at = time.perf_counter()
+    report("familiar_base", 47, "Считаем знакомые треки твоих артистов")
     familiar_results, familiar_failures = _run_threaded(
         base_familiar_source_ids,
-        lambda artist_id: _fetch_artist_familiar(worker_client(), artist_id),
+        lambda artist_id: _fetch_artist_familiar_with_tracks(worker_client(), artist_id),
     )
+    base_familiar_track_count = 0
     for familiar in familiar_results:
-        store_familiar(familiar)
+        base_familiar_track_count += store_familiar_fetch(familiar)
 
     liked_artist_ids = {liked_artist.artist.id for liked_artist in liked_artists}
     missing_liked_familiar_ids = [artist_id for artist_id in sorted(liked_artist_ids) if artist_id not in known_counts]
     liked_familiar_results, liked_familiar_failures = _run_threaded(
         missing_liked_familiar_ids,
-        lambda artist_id: _fetch_artist_familiar(worker_client(), artist_id),
+        lambda artist_id: _fetch_artist_familiar_with_tracks(worker_client(), artist_id),
     )
     familiar_failures += liked_familiar_failures
     for familiar in liked_familiar_results:
-        store_familiar(familiar)
+        base_familiar_track_count += store_familiar_fetch(familiar)
+    tracks = _dedupe_tracks(tracks)
+    listen_counts = _listen_counts_from_tracks(tracks)
     familiar_base_seconds = time.perf_counter() - stage_started_at
     familiar_base_message = (
-        f"ok: {len(familiar_results) + len(liked_familiar_results)} stats from "
+        f"ok: {len(familiar_results) + len(liked_familiar_results)} stats, "
+        f"{base_familiar_track_count} tracks from "
         f"{len(base_familiar_source_ids) + len(missing_liked_familiar_ids)} candidates"
     )
     if familiar_failures:
         familiar_base_message += f" ({familiar_failures} failed)"
     source_status["familiar_base"] = _status_with_duration(familiar_base_message, familiar_base_seconds)
+    report("familiar_base", 56, "Знакомые треки базовых артистов загружены")
 
     ranked_artist_ids = [
         artist_id
@@ -684,6 +791,7 @@ def _fetch_snapshot_sync(token: str) -> ListeningSnapshot:
     catalog_scanned_artist_ids: set[str] = set()
     base_catalog_source_ids = _unique_ids(ranked_artist_ids[: settings.catalog_collab_source_limit])
     stage_started_at = time.perf_counter()
+    report("catalog_base", 58, "Смотрим коллабы твоих исполнителей")
     catalog_results, catalog_failures = _run_threaded(
         base_catalog_source_ids,
         lambda artist_id: (
@@ -712,11 +820,13 @@ def _fetch_snapshot_sync(token: str) -> ListeningSnapshot:
         catalog_message = "empty"
     source_status["catalog_base"] = _status_with_duration(catalog_message, catalog_base_seconds)
     source_status["catalog_collabs"] = _status_with_duration(catalog_message, catalog_base_seconds)
+    report("catalog_base", 66, "Коллабы твоих исполнителей разобраны")
 
     similar: list[SimilarArtistSnapshot] = []
     similar_scanned_artist_ids: set[str] = set()
     base_similar_source_ids = _unique_ids(ranked_artist_ids[: settings.similar_source_limit])
     stage_started_at = time.perf_counter()
+    report("similar_base", 68, "Ищем похожих артистов")
     similar_results, similar_failures = _run_threaded(
         base_similar_source_ids,
         lambda artist_id: (artist_id, _similar_from_artist(worker_client(), artist_id)),
@@ -734,6 +844,7 @@ def _fetch_snapshot_sync(token: str) -> ListeningSnapshot:
         similar_message = "empty"
     source_status["similar_base"] = _status_with_duration(similar_message, similar_base_seconds)
     source_status["similar"] = _status_with_duration(similar_message, similar_base_seconds)
+    report("similar_base", 72, "Похожие артисты найдены")
 
     existing_familiar_ids = set(familiar_by_artist_id)
     neighbor_scores: dict[str, int] = {}
@@ -751,20 +862,23 @@ def _fetch_snapshot_sync(token: str) -> ListeningSnapshot:
         ]
     )
     stage_started_at = time.perf_counter()
+    report("familiar_neighbors", 73, "Проверяем знакомые треки найденных соседей")
     neighbor_familiar_results, neighbor_familiar_failures = _run_threaded(
         neighbor_familiar_source_ids,
-        lambda artist_id: _fetch_artist_familiar(worker_client(), artist_id),
+        lambda artist_id: _fetch_artist_familiar_with_tracks(worker_client(), artist_id),
     )
     neighbor_familiar_count = 0
+    neighbor_familiar_track_count = 0
     for familiar in neighbor_familiar_results:
-        if familiar and familiar.artist_id not in existing_familiar_ids:
+        if familiar and familiar.familiar.artist_id not in existing_familiar_ids:
             neighbor_familiar_count += 1
-        store_familiar(familiar)
+        neighbor_familiar_track_count += store_familiar_fetch(familiar)
         if familiar:
-            existing_familiar_ids.add(familiar.artist_id)
+            existing_familiar_ids.add(familiar.familiar.artist_id)
     familiar_neighbors_seconds = time.perf_counter() - stage_started_at
     familiar_neighbors_message = (
-        f"ok: {neighbor_familiar_count} new stats from {len(neighbor_familiar_source_ids)} candidates"
+        f"ok: {neighbor_familiar_count} new stats, {neighbor_familiar_track_count} tracks "
+        f"from {len(neighbor_familiar_source_ids)} candidates"
     )
     if neighbor_familiar_failures:
         familiar_neighbors_message += f" ({neighbor_familiar_failures} failed)"
@@ -772,6 +886,7 @@ def _fetch_snapshot_sync(token: str) -> ListeningSnapshot:
         familiar_neighbors_message,
         familiar_neighbors_seconds,
     )
+    report("familiar_neighbors", 77, "Соседи графа проверены")
 
     deep_catalog_collabs: list[ArtistCatalogCollabSnapshot] = []
     deep_catalog_source_count = 0
@@ -796,21 +911,24 @@ def _fetch_snapshot_sync(token: str) -> ListeningSnapshot:
         artist_id for artist_id in deep_catalog_source_ids if artist_id not in existing_familiar_ids
     ]
     stage_started_at = time.perf_counter()
+    report("familiar_depth", 78, "Догружаем знакомые треки для глубины графа")
     deep_catalog_familiar_results, deep_catalog_familiar_failures = _run_threaded(
         missing_deep_catalog_familiar_ids,
-        lambda artist_id: _fetch_artist_familiar(worker_client(), artist_id),
+        lambda artist_id: _fetch_artist_familiar_with_tracks(worker_client(), artist_id),
     )
     familiar_failures += deep_catalog_familiar_failures
     deep_catalog_source_familiar_count = 0
+    deep_catalog_familiar_track_count = 0
     for familiar in deep_catalog_familiar_results:
-        if familiar and familiar.artist_id not in existing_familiar_ids:
+        if familiar and familiar.familiar.artist_id not in existing_familiar_ids:
             deep_catalog_source_familiar_count += 1
-        store_familiar(familiar)
+        deep_catalog_familiar_track_count += store_familiar_fetch(familiar)
         if familiar:
-            existing_familiar_ids.add(familiar.artist_id)
+            existing_familiar_ids.add(familiar.familiar.artist_id)
     familiar_depth_seconds += time.perf_counter() - stage_started_at
 
     stage_started_at = time.perf_counter()
+    report("catalog_depth", 81, "Раскрываем граф дальше по дискографии")
     deep_catalog_results, deep_catalog_failures = _run_threaded(
         deep_catalog_source_ids,
         lambda artist_id: (
@@ -839,6 +957,7 @@ def _fetch_snapshot_sync(token: str) -> ListeningSnapshot:
     if deep_catalog_failures:
         catalog_depth_message += f" ({deep_catalog_failures} failed)"
     source_status["catalog_depth"] = _status_with_duration(catalog_depth_message, catalog_depth_seconds)
+    report("catalog_depth", 84, "Глубина дискографии разобрана")
 
     deep_similar: list[SimilarArtistSnapshot] = []
     deep_similar_source_count = 0
@@ -860,6 +979,7 @@ def _fetch_snapshot_sync(token: str) -> ListeningSnapshot:
         ]
     )
     stage_started_at = time.perf_counter()
+    report("similar_depth", 85, "Раскрываем похожих артистов дальше")
     deep_similar_results, deep_similar_failures = _run_threaded(
         deep_similar_source_ids,
         lambda artist_id: (artist_id, _similar_from_artist(worker_client(), artist_id)),
@@ -875,6 +995,7 @@ def _fetch_snapshot_sync(token: str) -> ListeningSnapshot:
     if deep_similar_failures:
         similar_depth_message += f" ({deep_similar_failures} failed)"
     source_status["similar_depth"] = _status_with_duration(similar_depth_message, similar_depth_seconds)
+    report("similar_depth", 87, "Глубина похожих артистов разобрана")
 
     deep_neighbor_scores: dict[str, int] = {}
     for collab in deep_catalog_collabs:
@@ -897,25 +1018,32 @@ def _fetch_snapshot_sync(token: str) -> ListeningSnapshot:
         ]
     )
     stage_started_at = time.perf_counter()
+    report("familiar_depth", 88, "Догружаем знакомые треки новых артистов")
     deep_neighbor_familiar_results, deep_neighbor_familiar_failures = _run_threaded(
         deep_neighbor_familiar_source_ids,
-        lambda artist_id: _fetch_artist_familiar(worker_client(), artist_id),
+        lambda artist_id: _fetch_artist_familiar_with_tracks(worker_client(), artist_id),
     )
     deep_neighbor_familiar_count = 0
+    deep_neighbor_familiar_track_count = 0
     for familiar in deep_neighbor_familiar_results:
-        if familiar and familiar.artist_id not in existing_familiar_ids:
+        if familiar and familiar.familiar.artist_id not in existing_familiar_ids:
             deep_neighbor_familiar_count += 1
-        store_familiar(familiar)
+        deep_neighbor_familiar_track_count += store_familiar_fetch(familiar)
         if familiar:
-            existing_familiar_ids.add(familiar.artist_id)
+            existing_familiar_ids.add(familiar.familiar.artist_id)
     familiar_depth_seconds += time.perf_counter() - stage_started_at
     familiar_depth_count = deep_catalog_source_familiar_count + deep_neighbor_familiar_count
     familiar_depth_candidates = len(missing_deep_catalog_familiar_ids) + len(deep_neighbor_familiar_source_ids)
     familiar_depth_failures = deep_catalog_familiar_failures + deep_neighbor_familiar_failures
-    familiar_depth_message = f"ok: {familiar_depth_count} new stats from {familiar_depth_candidates} candidates"
+    familiar_depth_track_count = deep_catalog_familiar_track_count + deep_neighbor_familiar_track_count
+    familiar_depth_message = (
+        f"ok: {familiar_depth_count} new stats, {familiar_depth_track_count} tracks "
+        f"from {familiar_depth_candidates} candidates"
+    )
     if familiar_depth_failures:
         familiar_depth_message += f" ({familiar_depth_failures} failed)"
     source_status["familiar_depth"] = _status_with_duration(familiar_depth_message, familiar_depth_seconds)
+    report("familiar_depth", 90, "Знакомые треки глубины загружены")
 
     artist_familiar = list(familiar_by_artist_id.values())
 
@@ -953,6 +1081,7 @@ def _fetch_snapshot_sync(token: str) -> ListeningSnapshot:
         "fetch_snapshot",
         time.perf_counter() - sync_started_at,
     )
+    report("fetch_done", 91, "Данные Яндекса собраны, готовим сохранение")
     return ListeningSnapshot(
         tracks=tracks,
         similar_artists=similar,
@@ -965,13 +1094,16 @@ def _fetch_snapshot_sync(token: str) -> ListeningSnapshot:
     )
 
 
-async def fetch_listening_snapshot(token: str) -> ListeningSnapshot:
+async def fetch_listening_snapshot(
+    token: str,
+    progress_reporter: ProgressReporter | None = None,
+) -> ListeningSnapshot:
     if settings.mock_yandex or token.startswith("mock-"):
         return _mock_snapshot()
-    return await asyncio.to_thread(_fetch_snapshot_sync, token)
+    return await asyncio.to_thread(_fetch_snapshot_sync, token, progress_reporter)
 
 
-def _fetch_artist_familiar_batch_sync(token: str, artist_ids: list[str]) -> list[ArtistFamiliarSnapshot]:
+def _fetch_artist_familiar_batch_with_tracks_sync(token: str, artist_ids: list[str]) -> list[ArtistFamiliarFetch]:
     from yandex_music import Client
 
     worker_state = local()
@@ -985,9 +1117,22 @@ def _fetch_artist_familiar_batch_sync(token: str, artist_ids: list[str]) -> list
 
     results, _failures = _run_threaded(
         _unique_ids(artist_ids),
-        lambda artist_id: _fetch_artist_familiar(worker_client(), artist_id),
+        lambda artist_id: _fetch_artist_familiar_with_tracks(worker_client(), artist_id),
     )
     return [item for item in results if item is not None]
+
+
+async def fetch_artist_familiar_batch_with_tracks(
+    token: str, artist_ids: Iterable[str]
+) -> list[ArtistFamiliarFetch]:
+    artist_id_list = _unique_ids(artist_ids)
+    if not artist_id_list or settings.mock_yandex or token.startswith("mock-"):
+        return []
+    return await asyncio.to_thread(_fetch_artist_familiar_batch_with_tracks_sync, token, artist_id_list)
+
+
+def _fetch_artist_familiar_batch_sync(token: str, artist_ids: list[str]) -> list[ArtistFamiliarSnapshot]:
+    return [item.familiar for item in _fetch_artist_familiar_batch_with_tracks_sync(token, artist_ids)]
 
 
 async def fetch_artist_familiar_batch(token: str, artist_ids: Iterable[str]) -> list[ArtistFamiliarSnapshot]:

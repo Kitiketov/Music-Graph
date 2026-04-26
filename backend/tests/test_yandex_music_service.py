@@ -5,6 +5,8 @@ from app.services.yandex_music_service import (
     TrackSnapshot,
     _artist_familiar_from_info,
     _catalog_collabs_from_tracks,
+    _familiar_tracks_from_payload,
+    _fetch_artist_familiar_with_tracks,
     _history_track_refs,
     _tracks_from_history,
     _tracks_from_likes,
@@ -113,6 +115,102 @@ def test_artist_familiar_from_info_sums_wave_and_collection() -> None:
     assert familiar.known_track_count == 95
     assert familiar.wave_track_count == 83
     assert familiar.collection_track_count == 12
+
+
+def test_artist_familiar_from_full_payload_counts_embedded_tracks() -> None:
+    familiar = _artist_familiar_from_info(
+        "7715095",
+        {
+            "wave": {
+                "tracks": [
+                    {
+                        "id": "122154355",
+                        "title": "Tsunami",
+                        "artists": [{"id": "161010", "name": "NYUSHA"}, {"id": "7715095", "name": "AUM RAA"}],
+                    }
+                ]
+            },
+            "collection": {
+                "tracks": [
+                    {
+                        "id": "126102126",
+                        "title": "KARATE",
+                        "artists": [{"id": "5688391", "name": "SQWOZ BAB"}, {"id": "7715095", "name": "AUM RAA"}],
+                    }
+                ],
+                "albums": [{"id": "album-1"}],
+            },
+        },
+    )
+
+    assert familiar is not None
+    assert familiar.known_track_count == 2
+    assert familiar.wave_track_count == 1
+    assert familiar.collection_track_count == 1
+    assert familiar.collection_album_count == 1
+
+
+def test_familiar_tracks_from_payload_keeps_sources_separate() -> None:
+    tracks = _familiar_tracks_from_payload(
+        {
+            "wave": {
+                "tracks": [
+                    {
+                        "id": "122154355",
+                        "title": "Tsunami",
+                        "artists": [{"id": "161010", "name": "NYUSHA"}, {"id": "7715095", "name": "AUM RAA"}],
+                    }
+                ]
+            },
+            "collection": {
+                "tracks": [
+                    {
+                        "id": "126102126",
+                        "title": "KARATE",
+                        "artists": [{"id": "5688391", "name": "SQWOZ BAB"}, {"id": "7715095", "name": "AUM RAA"}],
+                    }
+                ]
+            },
+        }
+    )
+
+    assert [(track.id, track.source) for track in tracks] == [
+        ("122154355", "familiar_wave"),
+        ("126102126", "familiar_collection"),
+    ]
+    assert [artist.name for artist in tracks[0].artists] == ["NYUSHA", "AUM RAA"]
+
+
+def test_fetch_artist_familiar_uses_full_familiar_endpoint() -> None:
+    requested_urls: list[str] = []
+
+    class Request:
+        def get(self, url: str):
+            requested_urls.append(url)
+            return {
+                "wave": {
+                    "trackCount": 1,
+                    "tracks": [
+                        {
+                            "id": "122154355",
+                            "title": "Tsunami",
+                            "artists": [{"id": "161010", "name": "NYUSHA"}, {"id": "7715095", "name": "AUM RAA"}],
+                        }
+                    ],
+                },
+                "collection": {"trackCount": 0, "albumCount": 0},
+            }
+
+    result = _fetch_artist_familiar_with_tracks(
+        SimpleNamespace(base_url="https://api.music.yandex.ru", _request=Request()),
+        "7715095",
+    )
+
+    assert result is not None
+    assert "/artists/7715095/familiar-you?" in requested_urls[0]
+    assert "/info" not in requested_urls[0]
+    assert result.familiar.known_track_count == 1
+    assert result.tracks[0].title == "Tsunami"
 
 
 def test_catalog_collabs_from_tracks_counts_featured_artists() -> None:

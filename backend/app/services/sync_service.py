@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from datetime import UTC, datetime
 from uuid import UUID
@@ -21,9 +22,11 @@ from app.db.models import (
     YandexCredential,
 )
 from app.services.yandex_music_service import (
+    ArtistFamiliarFetch,
     ArtistFamiliarSnapshot,
     ListeningSnapshot,
-    fetch_artist_familiar_batch,
+    TrackSnapshot,
+    fetch_artist_familiar_batch_with_tracks,
     fetch_listening_snapshot,
 )
 
@@ -34,6 +37,18 @@ def _format_seconds(seconds: float) -> str:
 
 def _status_with_duration(message: str, seconds: float) -> str:
     return f"{message} / {_format_seconds(seconds)}"
+
+
+def _with_current_stage(source_status: dict | None, stage_key: str) -> dict:
+    payload = dict(source_status or {})
+    payload["_current_stage"] = stage_key
+    return payload
+
+
+def _listen_event_key(user_id: UUID, track: TrackSnapshot, played: datetime, index: int) -> str:
+    if track.played_at is None and track.source.startswith("familiar_"):
+        return f"{user_id}:{track.source}:{track.id}"
+    return f"{user_id}:{track.source}:{track.id}:{played.isoformat()}:{index}"
 
 
 async def set_job_status(
@@ -125,7 +140,7 @@ async def _upsert_snapshot(db: AsyncSession, user_id: UUID, snapshot: ListeningS
 
     for index, track in enumerate(snapshot.tracks):
         played = track.played_at or datetime.now(UTC)
-        event_key = f"{user_id}:{track.source}:{track.id}:{played.isoformat()}:{index}"
+        event_key = _listen_event_key(user_id, track, played, index)
         await db.execute(
             insert(UserListen)
             .values(
@@ -391,15 +406,101 @@ async def _upsert_artist_familiar(
     return saved
 
 
-async def _backfill_cached_edge_familiar(db: AsyncSession, *, user_id: UUID, token: str) -> int:
+def _familiar_items_from_fetches(fetches: list[ArtistFamiliarFetch]) -> list[ArtistFamiliarSnapshot]:
+    return [item.familiar for item in fetches]
+
+
+def _tracks_from_familiar_fetches(fetches: list[ArtistFamiliarFetch]) -> list[TrackSnapshot]:
+    seen_track_ids: set[str] = set()
+    tracks: list[TrackSnapshot] = []
+    for item in fetches:
+        for track in item.tracks:
+            if track.id in seen_track_ids:
+                continue
+            seen_track_ids.add(track.id)
+            tracks.append(track)
+    return tracks
+
+
+async def _upsert_familiar_tracks(db: AsyncSession, user_id: UUID, tracks: list[TrackSnapshot]) -> int:
+    if not tracks:
+        return 0
+
+    for track in tracks:
+        await db.execute(
+            insert(Track)
+            .values(
+                id=track.id,
+                title=track.title,
+                cover_uri=track.cover_uri,
+                duration_ms=track.duration_ms,
+                raw=track.raw,
+            )
+            .on_conflict_do_update(
+                index_elements=[Track.id],
+                set_={
+                    "title": track.title,
+                    "cover_uri": track.cover_uri,
+                    "duration_ms": track.duration_ms,
+                    "raw": track.raw,
+                },
+            )
+        )
+        for artist in track.artists:
+            await db.execute(
+                insert(Artist)
+                .values(id=artist.id, name=artist.name, image_url=artist.image_url, raw=artist.raw)
+                .on_conflict_do_update(
+                    index_elements=[Artist.id],
+                    set_={"name": artist.name, "image_url": artist.image_url, "raw": artist.raw},
+                )
+            )
+            await db.execute(
+                insert(TrackArtist)
+                .values(track_id=track.id, artist_id=artist.id, role="primary")
+                .on_conflict_do_nothing(index_elements=[TrackArtist.track_id, TrackArtist.artist_id])
+            )
+
+    for index, track in enumerate(tracks):
+        played = track.played_at or datetime.now(UTC)
+        await db.execute(
+            insert(UserListen)
+            .values(
+                user_id=user_id,
+                track_id=track.id,
+                source=track.source,
+                played_at=played,
+                event_key=_listen_event_key(user_id, track, played, index),
+            )
+            .on_conflict_do_nothing(index_elements=[UserListen.event_key])
+        )
+
+    await db.commit()
+    return len(tracks)
+
+
+async def _backfill_cached_edge_familiar(db: AsyncSession, *, user_id: UUID, token: str) -> tuple[int, int]:
     candidate_ids = await _cached_edge_familiar_candidates(db, user_id)
-    familiar_items = await fetch_artist_familiar_batch(token, candidate_ids)
-    return await _upsert_artist_familiar(db, user_id=user_id, familiar_items=familiar_items)
+    familiar_fetches = await fetch_artist_familiar_batch_with_tracks(token, candidate_ids)
+    familiar_count = await _upsert_artist_familiar(
+        db,
+        user_id=user_id,
+        familiar_items=_familiar_items_from_fetches(familiar_fetches),
+    )
+    track_count = await _upsert_familiar_tracks(db, user_id, _tracks_from_familiar_fetches(familiar_fetches))
+    return familiar_count, track_count
 
 
 async def sync_user_music(db: AsyncSession, job_id: UUID, user_id: UUID) -> None:
     sync_started_at = time.perf_counter()
-    await set_job_status(db, job_id, status="running", progress=5, message="Loading Yandex token")
+    await set_job_status(
+        db,
+        job_id,
+        status="running",
+        progress=5,
+        message="Готовим подключение к Яндекс Музыке",
+        source_status=_with_current_stage({}, "token"),
+    )
     credential = await db.get(YandexCredential, user_id)
     if credential is None:
         raise RuntimeError("No Yandex credential for user")
@@ -408,15 +509,43 @@ async def sync_user_music(db: AsyncSession, job_id: UUID, user_id: UUID) -> None
     if not token:
         raise RuntimeError("Stored Yandex token could not be decrypted")
 
-    await set_job_status(db, job_id, status="running", progress=20, message="Fetching music history")
-    snapshot = await fetch_listening_snapshot(token)
+    loop = asyncio.get_running_loop()
+
+    def report_fetch_stage(stage_key: str, progress: int, message: str, source_status: dict[str, str]) -> None:
+        payload = _with_current_stage(source_status, stage_key)
+        future = asyncio.run_coroutine_threadsafe(
+            set_job_status(
+                db,
+                job_id,
+                status="running",
+                progress=progress,
+                message=message,
+                source_status=payload,
+            ),
+            loop,
+        )
+        try:
+            future.result(timeout=10)
+        except Exception:  # noqa: BLE001
+            # Progress reporting should never break the actual sync.
+            return
+
     await set_job_status(
         db,
         job_id,
         status="running",
-        progress=70,
-        message=f"Saving {len(snapshot.tracks)} listened tracks",
-        source_status=snapshot.source_status,
+        progress=12,
+        message="Начинаем синхронизацию Яндекс Музыки",
+        source_status=_with_current_stage({}, "start"),
+    )
+    snapshot = await fetch_listening_snapshot(token, progress_reporter=report_fetch_stage)
+    await set_job_status(
+        db,
+        job_id,
+        status="running",
+        progress=92,
+        message=f"Сохраняем {len(snapshot.tracks)} треков и связи графа",
+        source_status=_with_current_stage(snapshot.source_status, "save_db"),
     )
     stage_started_at = time.perf_counter()
     await _upsert_snapshot(db, user_id, snapshot)
@@ -425,23 +554,28 @@ async def sync_user_music(db: AsyncSession, job_id: UUID, user_id: UUID) -> None
         db,
         job_id,
         status="running",
-        progress=85,
-        message="Refreshing connected artists",
-        source_status=snapshot.source_status,
+        progress=96,
+        message="Догружаем знакомые треки для кэшированных связей",
+        source_status=_with_current_stage(snapshot.source_status, "cached_familiar"),
     )
     stage_started_at = time.perf_counter()
-    cached_familiar_count = await _backfill_cached_edge_familiar(db, user_id=user_id, token=token)
+    cached_familiar_count, cached_familiar_track_count = await _backfill_cached_edge_familiar(
+        db,
+        user_id=user_id,
+        token=token,
+    )
     snapshot.source_status["cached_familiar"] = _status_with_duration(
-        f"ok: {cached_familiar_count} cached-edge artists",
+        f"ok: {cached_familiar_count} cached-edge artists, {cached_familiar_track_count} tracks",
         time.perf_counter() - stage_started_at,
     )
     snapshot.source_status["sync_total"] = _status_with_duration("ok", time.perf_counter() - sync_started_at)
+    snapshot.source_status["_current_stage"] = "done"
     await set_job_status(
         db,
         job_id,
         status="completed",
         progress=100,
-        message="Sync completed",
+        message="Синхронизация завершена",
         source_status=snapshot.source_status,
     )
 

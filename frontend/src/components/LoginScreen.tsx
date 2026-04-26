@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Copy, ExternalLink, Music2, RefreshCcw } from "lucide-react";
+import { Copy, ExternalLink, Music2, Network, RefreshCcw, ShieldCheck, Users } from "lucide-react";
 import { api, setToken } from "../api/client";
 import { LEGAL_VERSION, legalSummary, privacyText, termsText } from "../legal";
 import type { QrStartResponse, User } from "../types/api";
@@ -7,6 +7,31 @@ import type { QrStartResponse, User } from "../types/api";
 type Props = {
   onLogin: (user: User) => void;
 };
+
+const serviceCards = [
+  {
+    title: "Музыкальная карта",
+    text: "Пузырьки — это артисты из твоих лайков, истории, знакомых треков и Моей волны. Чем больше знакомых треков, тем крупнее артист."
+  },
+  {
+    title: "Коллабы и связи",
+    text: "Зеленые линии показывают треки, которые ты реально слышал. Синие связи можно включить отдельно — это найденные коллабы из дискографии."
+  },
+  {
+    title: "Похожие артисты",
+    text: "Похожие артисты добавляются только если Яндекс видит у тебя больше 0 знакомых треков, чтобы граф не превращался в случайную кашу."
+  },
+  {
+    title: "Друзья и сравнение",
+    text: "Можно обменяться приглашением, открыть граф друга и увидеть общих артистов, пересечение вкусов и общие музыкальные острова."
+  }
+];
+
+const serviceSteps = [
+  "Входишь через QR-страницу Яндекса.",
+  "Сервис синхронизирует лайки, историю, знакомые треки артистов и связи.",
+  "Граф можно фильтровать по глубине, коллабам, похожим артистам и силе отталкивания."
+];
 
 export function LoginScreen({ onLogin }: Props) {
   const qrWindowRef = useRef<Window | null>(null);
@@ -142,6 +167,19 @@ export function LoginScreen({ onLogin }: Props) {
   return (
     <main className="login-shell">
       <section className="login-visual" aria-hidden="true">
+        <div className="visual-copy">
+          <p className="eyebrow">Music Graph</p>
+          <h2>Твой вкус как сеть артистов</h2>
+          <p>
+            Не просто список любимых треков, а живая карта: кто с кем связан, кого ты уже знаешь
+            и где рядом спрятаны новые коллабы.
+          </p>
+          <div className="visual-stats">
+            <span>лайки</span>
+            <span>волна</span>
+            <span>коллабы</span>
+          </div>
+        </div>
         <div className="vinyl-disc">
           <div className="vinyl-label">
             <Music2 size={38} />
@@ -163,6 +201,46 @@ export function LoginScreen({ onLogin }: Props) {
             отсканируй QR и оставь этот сайт открытым.
           </p>
         </div>
+
+        <section className="service-overview" aria-label="Что делает Music Graph">
+          <div className="overview-heading">
+            <Network size={20} />
+            <div>
+              <h2>Что это за сервис</h2>
+              <p>Music Graph превращает твой аккаунт Яндекс Музыки в интерактивный граф артистов.</p>
+            </div>
+          </div>
+
+          <div className="overview-grid">
+            {serviceCards.map((card) => (
+              <article className="overview-card" key={card.title}>
+                <strong>{card.title}</strong>
+                <p>{card.text}</p>
+              </article>
+            ))}
+          </div>
+
+          <div className="service-flow">
+            <div className="flow-title">
+              <Users size={18} />
+              <strong>Как это работает</strong>
+            </div>
+            {serviceSteps.map((step, index) => (
+              <p key={step}>
+                <span>{index + 1}</span>
+                {step}
+              </p>
+            ))}
+          </div>
+
+          <div className="privacy-note">
+            <ShieldCheck size={18} />
+            <p>
+              Токены хранятся зашифрованно, данные можно удалить кнопкой в приложении. Перед входом ниже нужно принять
+              соглашение, потому что сервис сохраняет музыкальные данные для построения графа.
+            </p>
+          </div>
+        </section>
 
         <section className="agreement-card">
           <div className="agreement-heading">

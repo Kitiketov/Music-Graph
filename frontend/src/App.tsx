@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Filter, LogOut, Search, SlidersHorizontal, Trash2 } from "lucide-react";
 import { api, clearToken, getToken } from "./api/client";
 import { FriendsPanel } from "./components/FriendsPanel";
@@ -7,6 +7,121 @@ import { LoginScreen } from "./components/LoginScreen";
 import { SyncPanel } from "./components/SyncPanel";
 import { LEGAL_VERSION } from "./legal";
 import type { CompareResponse, GraphResponse, User } from "./types/api";
+
+const dashboardGuide = [
+  {
+    title: "Размер пузырька",
+    text: "Показывает, сколько знакомых треков артиста нашел Яндекс. Если данных нет, берем локальные прослушивания."
+  },
+  {
+    title: "Зеленые связи",
+    text: "Это реальные коллабы из твоих лайков, истории, Моей волны и знакомых треков артиста."
+  },
+  {
+    title: "Синие связи",
+    text: "Дискография: найденные коллабы, которые можно включить чекбоксом, чтобы искать новые переходы."
+  },
+  {
+    title: "Друзья",
+    text: "Приглашение открывает сравнение графов: общие артисты подсвечиваются, а процент показывает пересечение вкусов."
+  }
+];
+
+function graphNodeScore(node: GraphResponse["nodes"][number]) {
+  return node.listenCount || node.knownTrackCount || node.trackCount || 0;
+}
+
+function GraphStatsPanel({ graph }: { graph: GraphResponse | null }) {
+  const stats = useMemo(() => {
+    if (!graph) return null;
+    const topArtists = [...graph.nodes]
+      .filter((node) => graphNodeScore(node) > 0)
+      .sort((left, right) => graphNodeScore(right) - graphNodeScore(left) || left.name.localeCompare(right.name))
+      .slice(0, 10);
+    const maxScore = Math.max(...topArtists.map(graphNodeScore), 1);
+    const collabEdges = graph.edges.filter((edge) => edge.type === "collab").length;
+    const catalogEdges = graph.edges.filter((edge) => edge.type === "catalog_collab").length;
+    const similarEdges = graph.edges.filter((edge) => edge.type === "similar").length;
+    const likedArtists = graph.nodes.filter((node) => node.isLikedArtist).length;
+
+    return {
+      topArtists,
+      maxScore,
+      collabEdges,
+      catalogEdges,
+      similarEdges,
+      likedArtists
+    };
+  }, [graph]);
+
+  if (!graph || !stats || stats.topArtists.length === 0) {
+    return null;
+  }
+
+  return (
+    <section className="graph-stats-panel">
+      <div className="stats-heading">
+        <div>
+          <p className="eyebrow">Статистика</p>
+          <h2>Топ-10 самых прослушиваемых артистов в графе</h2>
+        </div>
+        <div className="stats-summary">
+          <span>
+            <strong>{graph.nodes.length}</strong>
+            артистов
+          </span>
+          <span>
+            <strong>{graph.edges.length}</strong>
+            связей
+          </span>
+          <span>
+            <strong>{stats.likedArtists}</strong>
+            лайкнутых
+          </span>
+        </div>
+      </div>
+
+      <div className="stats-grid">
+        <div className="top-artists-list">
+          {stats.topArtists.map((artist, index) => {
+            const score = graphNodeScore(artist);
+            return (
+              <article className="top-artist-row" key={artist.id}>
+                <span className="top-artist-rank">{index + 1}</span>
+                {artist.image ? <img src={artist.image} alt="" /> : <span className="artist-fallback">{artist.name[0]}</span>}
+                <div>
+                  <strong>{artist.name}</strong>
+                  <p>
+                    {score} треков
+                    {typeof artist.waveTrackCount === "number" ? `, ${artist.waveTrackCount} из волны` : ""}
+                  </p>
+                  <span className="top-artist-bar">
+                    <i style={{ width: `${Math.max(8, (score / stats.maxScore) * 100)}%` }} />
+                  </span>
+                </div>
+              </article>
+            );
+          })}
+        </div>
+
+        <div className="connection-breakdown">
+          <article>
+            <strong>{stats.collabEdges}</strong>
+            <span>зеленых коллабов, которые ты слышал</span>
+          </article>
+          <article>
+            <strong>{stats.catalogEdges}</strong>
+            <span>коллабов из дискографии для исследования</span>
+          </article>
+          <article>
+            <strong>{stats.similarEdges}</strong>
+            <span>похожих связей от Яндекса</span>
+          </article>
+        </div>
+      </div>
+    </section>
+  );
+}
 
 export function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -133,6 +248,21 @@ export function App() {
         </div>
       </header>
 
+      <section className="dashboard-guide" aria-label="Как читать Music Graph">
+        <div>
+          <p className="eyebrow">Как читать граф</p>
+          <h2>Это карта твоих артистов, коллабов и похожих музыкальных островов</h2>
+        </div>
+        <div className="dashboard-guide-grid">
+          {dashboardGuide.map((item) => (
+            <article key={item.title}>
+              <strong>{item.title}</strong>
+              <p>{item.text}</p>
+            </article>
+          ))}
+        </div>
+      </section>
+
       <section className="layout">
         <aside className="left-rail">
           <FriendsPanel selectedFriendId={selectedFriendId} onSelectFriend={setSelectedFriendId} />
@@ -141,12 +271,14 @@ export function App() {
             {Object.keys(graph?.sourceStatus ?? {}).length === 0 ? (
               <p className="muted small">Нет данных sync</p>
             ) : (
-              Object.entries(graph?.sourceStatus ?? {}).map(([key, value]) => (
-                <p className="source-row" key={key}>
-                  <span>{key}</span>
-                  <strong>{value}</strong>
-                </p>
-              ))
+              Object.entries(graph?.sourceStatus ?? {})
+                .filter(([key]) => !key.startsWith("_"))
+                .map(([key, value]) => (
+                  <p className="source-row" key={key}>
+                    <span>{key}</span>
+                    <strong>{value}</strong>
+                  </p>
+                ))
             )}
           </section>
         </aside>
@@ -261,6 +393,7 @@ export function App() {
             showCatalogCollabEdges={showCatalogCollabs}
             showSimilarEdges={showSimilar}
           />
+          <GraphStatsPanel graph={graph} />
         </section>
       </section>
     </main>
