@@ -1,4 +1,6 @@
-# Music Graph
+<p align="center">
+  <img src="./docs/music_graph_header.svg" alt="Music Graph header" width="100%">
+</p>
 
 ![Platform](https://img.shields.io/badge/platform-Web-green)
 ![Language](https://img.shields.io/badge/language-Python%20%2B%20TypeScript-blue)
@@ -7,10 +9,6 @@
 ![Database](https://img.shields.io/badge/database-PostgreSQL-316192)
 ![Queue](https://img.shields.io/badge/queue-Redis%20%2B%20ARQ-DC382D)
 ![Status](https://img.shields.io/badge/status-in%20development-yellow)
-
-<p align="center">
-  <img src="./docs/music_graph_header.svg" alt="Music Graph header" width="100%">
-</p>
 
 Music Graph — веб-приложение для визуализации музыкального вкуса пользователя Яндекс Музыки в виде интерактивного графа артистов, коллабораций и похожих исполнителей.
 
