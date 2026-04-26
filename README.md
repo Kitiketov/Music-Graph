@@ -8,6 +8,10 @@
 ![Queue](https://img.shields.io/badge/queue-Redis%20%2B%20ARQ-DC382D)
 ![Status](https://img.shields.io/badge/status-in%20development-yellow)
 
+<p align="center">
+  <img src="./docs/music_graph_header.svg" alt="Music Graph header" width="100%">
+</p>
+
 Music Graph — веб-приложение для визуализации музыкального вкуса пользователя Яндекс Музыки в виде интерактивного графа артистов, коллабораций и похожих исполнителей.
 
 Проект помогает увидеть, какие артисты связаны между собой через прослушанные треки, лайки, «Мою волну», знакомые треки и дискографию, а также сравнить свой граф с друзьями.
