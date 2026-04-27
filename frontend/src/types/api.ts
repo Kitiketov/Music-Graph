@@ -115,7 +115,15 @@ export type CompareResponse = {
   overlapPercent: number;
 };
 
-export type PlaylistSource = "known" | "liked" | "wave" | "graph" | "friend_common";
+export type PlaylistSource =
+  | "known"
+  | "liked"
+  | "wave"
+  | "graph"
+  | "friend_common"
+  | "unheard_collabs"
+  | "unheard_liked_collabs"
+  | "friend_unheard_collabs";
 
 export type PlaylistBuildRequest = {
   source: PlaylistSource;

@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import delete, or_, select, update
+from sqlalchemy import and_, delete, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -76,6 +76,33 @@ async def set_job_status(
     if status in {"completed", "failed"}:
         job.finished_at = datetime.now(UTC)
     await db.commit()
+
+
+async def mark_stale_sync_jobs(db: AsyncSession, *, user_id: UUID | None = None) -> int:
+    cutoff = datetime.now(UTC) - timedelta(seconds=settings.sync_stale_after_seconds)
+    conditions = [
+        SyncJob.status.in_(["queued", "running"]),
+        or_(
+            SyncJob.started_at < cutoff,
+            and_(SyncJob.started_at.is_(None), SyncJob.created_at < cutoff),
+        ),
+    ]
+    if user_id is not None:
+        conditions.append(SyncJob.user_id == user_id)
+
+    result = await db.execute(
+        update(SyncJob)
+        .where(*conditions)
+        .values(
+            status="failed",
+            progress=100,
+            message="Sync stopped",
+            error=f"Sync job exceeded {settings.sync_stale_after_seconds}s and was marked stale",
+            finished_at=datetime.now(UTC),
+        )
+    )
+    await db.commit()
+    return int(result.rowcount or 0)
 
 
 async def _upsert_snapshot(db: AsyncSession, user_id: UUID, snapshot: ListeningSnapshot) -> None:
@@ -580,12 +607,23 @@ async def sync_user_music(db: AsyncSession, job_id: UUID, user_id: UUID) -> None
     )
 
 
-async def create_sync_job(db: AsyncSession, user_id: UUID) -> SyncJob:
+async def create_sync_job(db: AsyncSession, user_id: UUID) -> tuple[SyncJob, bool]:
+    await mark_stale_sync_jobs(db, user_id=user_id)
+    active_result = await db.execute(
+        select(SyncJob)
+        .where(SyncJob.user_id == user_id, SyncJob.status.in_(["queued", "running"]))
+        .order_by(SyncJob.created_at.desc())
+        .limit(1)
+    )
+    active_job = active_result.scalar_one_or_none()
+    if active_job is not None:
+        return active_job, False
+
     job = SyncJob(user_id=user_id, status="queued", progress=0, message="Queued")
     db.add(job)
     await db.commit()
     await db.refresh(job)
-    return job
+    return job, True
 
 
 async def get_latest_source_status(db: AsyncSession, user_id: UUID) -> dict:

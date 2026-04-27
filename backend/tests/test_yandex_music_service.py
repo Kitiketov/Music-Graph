@@ -226,4 +226,9 @@ def test_catalog_collabs_from_tracks_counts_featured_artists() -> None:
     collabs = _catalog_collabs_from_tracks("1", tracks)
 
     assert [(item.artist.id, item.weight) for item in collabs] == [("2", 2), ("3", 1)]
-    assert collabs[0].tracks == ["Song One", "Song Two"]
+    assert [track["title"] for track in collabs[0].tracks] == ["Song One", "Song Two"]
+    assert [track["id"] for track in collabs[0].tracks] == ["t1", "t2"]
+    assert collabs[0].tracks[0]["artists"] == [
+        {"id": "1", "name": "Source"},
+        {"id": "2", "name": "Featured"},
+    ]

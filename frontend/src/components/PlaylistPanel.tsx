@@ -28,6 +28,21 @@ const sourceOptions: Array<{ value: PlaylistSource; label: string; hint: string 
     value: "friend_common",
     label: "С другом",
     hint: "Треки, которые есть и у тебя, и у выбранного друга"
+  },
+  {
+    value: "unheard_collabs",
+    label: "Новые коллабы",
+    hint: "Неслушанные треки из синих связей дискографии твоих артистов"
+  },
+  {
+    value: "unheard_liked_collabs",
+    label: "Коллабы любимых",
+    hint: "Неслушанные коллабы артистов, которых ты отметил сердечком"
+  },
+  {
+    value: "friend_unheard_collabs",
+    label: "Новые с другом",
+    hint: "Неслушанные коллабы артистов, которые пересекаются с выбранным другом"
   }
 ];
 
@@ -36,7 +51,10 @@ const defaultTitles: Record<PlaylistSource, string> = {
   liked: "Music Graph: лайкнутые треки",
   wave: "Music Graph: волна",
   graph: "Music Graph: треки из графа",
-  friend_common: "Music Graph: общие с другом"
+  friend_common: "Music Graph: общие с другом",
+  unheard_collabs: "Music Graph: новые коллабы",
+  unheard_liked_collabs: "Music Graph: новые коллабы любимых",
+  friend_unheard_collabs: "Music Graph: новые коллабы с другом"
 };
 
 function sourceHint(source: PlaylistSource): string {
@@ -58,7 +76,7 @@ export function PlaylistPanel({ disabled = false }: { disabled?: boolean }) {
 
   const visibleTracks = useMemo(() => preview?.tracks.slice(0, 6) ?? [], [preview]);
   const selectedFriend = friends.find((friend) => friend.friend.id === selectedFriendId);
-  const needsFriend = source === "friend_common";
+  const needsFriend = source === "friend_common" || source === "friend_unheard_collabs";
   const canPreview = !disabled && (!needsFriend || Boolean(selectedFriendId));
 
   useEffect(() => {
@@ -66,6 +84,8 @@ export function PlaylistPanel({ disabled = false }: { disabled?: boolean }) {
       setTitle(
         source === "friend_common" && selectedFriend
           ? `Music Graph: общие с ${selectedFriend.friend.display_login}`
+          : source === "friend_unheard_collabs" && selectedFriend
+            ? `Music Graph: новые коллабы с ${selectedFriend.friend.display_login}`
           : defaultTitles[source]
       );
     }

@@ -33,8 +33,10 @@ class Settings(BaseSettings):
     deep_similar_source_limit: int = 10
     similar_artists_per_source: int = 15
     external_fetch_workers: int = 4
-    cached_edge_familiar_limit: int = 600
+    cached_edge_familiar_limit: int = 220
     cached_edge_familiar_depth: int = 2
+    sync_job_timeout_seconds: int = 1800
+    sync_stale_after_seconds: int = 2100
     jwt_algorithm: str = "HS256"
     access_token_ttl_seconds: int = 60 * 60 * 24 * 14
 

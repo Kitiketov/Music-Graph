@@ -597,8 +597,6 @@ export function App() {
         <section className="workspace">
           <SyncPanel
             onComplete={loadGraph}
-            autoStart={Boolean(graph && graph.nodes.length === 0 && !loadingGraph)}
-            autoStartKey={user.id}
           />
 
           <section className="toolbar-section controls">
@@ -701,9 +699,6 @@ export function App() {
               Обновить граф
             </button>
           </section>
-
-          <PlaylistPanel disabled={!graph || graph.nodes.length === 0} />
-
           {overlayStats.length > 0 && (
             <section className="comparison-strip overlay-strip">
               <span>Пересечения на графе</span>
@@ -741,8 +736,15 @@ export function App() {
           />
           <SharedArtistsPanel graph={graph} overlayMatches={overlayMatches} />
           <GraphStatsPanel graph={graph} />
+          <PlaylistPanel disabled={!graph || graph.nodes.length === 0} />
         </section>
       </section>
+
+      <footer className="app-footer">
+        <strong>Music Graph</strong>
+        <span>Неофициальный эксперимент поверх Яндекс Музыки: данные хранятся локально в этом проекте и удаляются кнопкой с корзиной вверху.</span>
+        <span>Плейлисты создаются только после твоего подтверждения и приватными по умолчанию.</span>
+      </footer>
     </main>
   );
 }

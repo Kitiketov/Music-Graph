@@ -32,15 +32,22 @@ def _normalize_track_title(title: str) -> str:
     return " ".join(title.casefold().strip().split())
 
 
-def _unheard_catalog_tracks(catalog_tracks: list[str], listened_tracks: set[str]) -> list[str]:
+def _catalog_track_title(track: object) -> str:
+    if isinstance(track, dict):
+        return str(track.get("title") or "")
+    return str(track)
+
+
+def _unheard_catalog_tracks(catalog_tracks: list[object], listened_tracks: set[str]) -> list[str]:
     listened = {_normalize_track_title(track) for track in listened_tracks if track.strip()}
     result: list[str] = []
     seen: set[str] = set()
     for track in catalog_tracks:
-        normalized = _normalize_track_title(track)
+        title = _catalog_track_title(track)
+        normalized = _normalize_track_title(title)
         if not normalized or normalized in listened or normalized in seen:
             continue
-        result.append(track)
+        result.append(title)
         seen.add(normalized)
     return result
 

@@ -5,7 +5,16 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-PlaylistSource = Literal["known", "liked", "wave", "graph", "friend_common"]
+PlaylistSource = Literal[
+    "known",
+    "liked",
+    "wave",
+    "graph",
+    "friend_common",
+    "unheard_collabs",
+    "unheard_liked_collabs",
+    "friend_unheard_collabs",
+]
 PlaylistVisibility = Literal["private", "public"]
 
 

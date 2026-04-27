@@ -17,7 +17,7 @@ from app.core.security import decode_access_token
 from app.db.models import SyncJob, User
 from app.db.session import get_db
 from app.schemas.sync import SyncStartResponse, SyncStatusResponse
-from app.services.sync_service import create_sync_job
+from app.services.sync_service import create_sync_job, mark_stale_sync_jobs
 
 router = APIRouter()
 
@@ -41,12 +41,13 @@ async def start_sync(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> SyncStartResponse:
-    job = await create_sync_job(db, user.id)
-    redis = await create_pool(RedisSettings.from_dsn(settings.redis_url))
-    try:
-        await redis.enqueue_job("sync_user", str(job.id), str(user.id))
-    finally:
-        await redis.close()
+    job, created = await create_sync_job(db, user.id)
+    if created:
+        redis = await create_pool(RedisSettings.from_dsn(settings.redis_url))
+        try:
+            await redis.enqueue_job("sync_user", str(job.id), str(user.id))
+        finally:
+            await redis.close()
     return SyncStartResponse(job_id=job.id, status=job.status)
 
 
@@ -56,6 +57,7 @@ async def sync_status(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> SyncStatusResponse:
+    await mark_stale_sync_jobs(db, user_id=user.id)
     job = await db.get(SyncJob, UUID(job_id))
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sync job not found")

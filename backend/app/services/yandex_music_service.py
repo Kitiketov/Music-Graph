@@ -121,6 +121,23 @@ def _cover_url(cover_uri: str | None) -> str | None:
     return f"https://{cover_uri.replace('%%', '400x400')}"
 
 
+def _album_id_from_raw(raw: dict) -> str | None:
+    for key in ("album_id", "albumId"):
+        value = raw.get(key)
+        if value is not None and str(value).strip():
+            return str(value)
+
+    albums = raw.get("albums")
+    if isinstance(albums, list):
+        for album in albums:
+            if not isinstance(album, dict):
+                continue
+            value = album.get("id") or album.get("album_id") or album.get("albumId")
+            if value is not None and str(value).strip():
+                return str(value)
+    return None
+
+
 def _artist_from_any(value: Any) -> ArtistSnapshot | None:
     artist_id = _field(value, "id")
     name = _field(value, "name")
@@ -492,8 +509,19 @@ def _catalog_collabs_from_tracks(
                 collab = ArtistCatalogCollabSnapshot(source_artist_id=source_artist_id, artist=artist, weight=0)
                 by_artist_id[artist.id] = collab
             collab.weight += 1
-            if track.title not in collab.tracks and len(collab.tracks) < settings.edge_track_title_limit:
-                collab.tracks.append(track.title)
+            track_payload = {
+                "id": track.id,
+                "title": track.title,
+                "albumId": _album_id_from_raw(track.raw),
+                "cover": track.cover_uri,
+                "artists": [{"id": item.id, "name": item.name} for item in track.artists],
+            }
+            existing_titles = {
+                str(item.get("title") if isinstance(item, dict) else item)
+                for item in collab.tracks
+            }
+            if track.title not in existing_titles and len(collab.tracks) < settings.edge_track_title_limit:
+                collab.tracks.append(track_payload)
     return sorted(by_artist_id.values(), key=lambda item: (item.weight, item.artist.name.lower()), reverse=True)
 
 

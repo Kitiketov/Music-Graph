@@ -547,6 +547,26 @@ h2 {
   padding: 22px;
 }
 
+.app-footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  align-items: center;
+  justify-content: center;
+  margin-top: 18px;
+  padding: 16px;
+  border: 1px solid rgba(217, 224, 223, 0.9);
+  border-radius: 12px;
+  color: var(--muted);
+  background: rgba(255, 253, 247, 0.72);
+  font-size: 0.88rem;
+  text-align: center;
+}
+
+.app-footer strong {
+  color: var(--green-deep);
+}
+
 .topbar {
   display: flex;
   align-items: center;

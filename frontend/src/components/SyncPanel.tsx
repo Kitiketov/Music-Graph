@@ -1,12 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Activity, RotateCw } from "lucide-react";
 import { api } from "../api/client";
 import type { SyncStatusResponse } from "../types/api";
 
 type Props = {
   onComplete: () => void;
-  autoStart?: boolean;
-  autoStartKey?: string | null;
 };
 
 const syncStages = [
@@ -52,8 +50,7 @@ function JumpingDots() {
   );
 }
 
-export function SyncPanel({ onComplete, autoStart = false, autoStartKey = null }: Props) {
-  const autoStartedKeyRef = useRef<string | null>(null);
+export function SyncPanel({ onComplete }: Props) {
   const [sync, setSync] = useState<SyncStatusResponse | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -63,10 +60,24 @@ export function SyncPanel({ onComplete, autoStart = false, autoStartKey = null }
       return;
     }
     const timer = window.setInterval(async () => {
-      const next = await api.syncStatus(sync.job_id);
-      setSync(next);
-      if (next.status === "completed") {
-        onComplete();
+      try {
+        const next = await api.syncStatus(sync.job_id);
+        setSync(next);
+        if (next.status === "completed") {
+          onComplete();
+        }
+      } catch (statusError) {
+        setError(statusError instanceof Error ? statusError.message : "Не удалось обновить статус sync");
+        setSync((current) =>
+          current
+            ? {
+                ...current,
+                status: "failed",
+                progress: 100,
+                error: "Не удалось обновить статус sync"
+              }
+            : current
+        );
       }
     }, 1200);
     return () => window.clearInterval(timer);
@@ -90,18 +101,6 @@ export function SyncPanel({ onComplete, autoStart = false, autoStartKey = null }
       setBusy(false);
     }
   }, []);
-
-  useEffect(() => {
-    const key = autoStartKey ?? "default";
-    if (!autoStart || busy || sync?.status === "queued" || sync?.status === "running") {
-      return;
-    }
-    if (autoStartedKeyRef.current === key) {
-      return;
-    }
-    autoStartedKeyRef.current = key;
-    void startSync();
-  }, [autoStart, autoStartKey, busy, startSync, sync?.status]);
 
   const activeStageKey = currentStageKey(sync);
   const isRunning = sync?.status === "queued" || sync?.status === "running";

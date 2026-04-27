@@ -21,6 +21,7 @@ Music Graph — веб-приложение для визуализации му
 - [About](#about)
 - [Проектные материалы](#проектные-материалы)
 - [Шаги для установки](#шаги-для-установки)
+- [Деплой через GitHub Actions](#деплой-через-github-actions)
 - [Tech Stack](#tech-stack)
 - [Monitoring](#monitoring)
 - [Authors](#authors)
@@ -118,6 +119,46 @@ cd frontend
 npm install
 npm run build
 ```
+
+# Деплой через GitHub Actions
+
+В проект добавлен workflow `.github/workflows/deploy.yml`. Он запускает проверки backend/frontend, подключается к серверу по SSH и выполняет production-деплой через `docker-compose.prod.yml`.
+
+На сервере должны быть установлены:
+
+- `git`
+- `docker`
+- Docker Compose plugin, чтобы работала команда `docker compose`
+- SSH-пользователь должен иметь право запускать Docker
+
+В GitHub репозитории нужно добавить Secrets:
+
+- `SERVER_HOST` — IP или домен сервера
+- `SERVER_USER` — SSH-пользователь
+- `SERVER_SSH_KEY` — приватный SSH-ключ для входа на сервер
+- `SERVER_PORT` — SSH-порт, можно не задавать если используется `22`
+- `DEPLOY_PATH` — папка проекта на сервере, например `/opt/music-graph`
+
+Перед первым деплоем создай `.env` на сервере в папке `DEPLOY_PATH`. Можно взять `.env.example` за основу. Для production обычно важно заменить:
+
+```env
+SECRET_KEY=long-random-secret
+FERNET_KEY=
+FRONTEND_URL=https://your-domain.example
+CORS_ORIGINS=https://your-domain.example
+FRONTEND_API_BASE_URL=/api
+FRONTEND_PORT=80
+MOCK_YANDEX=false
+```
+
+После этого можно запустить `Deploy` вручную во вкладке GitHub Actions или просто сделать push в `master`.
+
+Production compose отличается от локального:
+
+- frontend собирается как статический Vite build и раздается через nginx
+- запросы `/api/*` nginx проксирует во FastAPI контейнер
+- PostgreSQL и Redis не публикуются наружу
+- API и worker автоматически перезапускаются через `restart: unless-stopped`
 
 # Tech Stack
 
