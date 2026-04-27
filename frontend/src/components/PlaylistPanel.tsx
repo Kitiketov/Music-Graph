@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { ListMusic, PlusCircle } from "lucide-react";
 import { api } from "../api/client";
-import type { PlaylistCreateResponse, PlaylistPreviewResponse, PlaylistSource } from "../types/api";
+import type { Friend, PlaylistCreateResponse, PlaylistPreviewResponse, PlaylistSource } from "../types/api";
 
 const sourceOptions: Array<{ value: PlaylistSource; label: string; hint: string }> = [
   {
@@ -23,6 +23,11 @@ const sourceOptions: Array<{ value: PlaylistSource; label: string; hint: string 
     value: "graph",
     label: "Весь граф",
     hint: "Все треки текущего графа без тестовых friend-playlist данных"
+  },
+  {
+    value: "friend_common",
+    label: "С другом",
+    hint: "Треки, которые есть и у тебя, и у выбранного друга"
   }
 ];
 
@@ -30,7 +35,8 @@ const defaultTitles: Record<PlaylistSource, string> = {
   known: "Music Graph: знакомые треки",
   liked: "Music Graph: лайкнутые треки",
   wave: "Music Graph: волна",
-  graph: "Music Graph: треки из графа"
+  graph: "Music Graph: треки из графа",
+  friend_common: "Music Graph: общие с другом"
 };
 
 function sourceHint(source: PlaylistSource): string {
@@ -39,6 +45,8 @@ function sourceHint(source: PlaylistSource): string {
 
 export function PlaylistPanel({ disabled = false }: { disabled?: boolean }) {
   const [source, setSource] = useState<PlaylistSource>("known");
+  const [friends, setFriends] = useState<Friend[]>([]);
+  const [selectedFriendId, setSelectedFriendId] = useState<string>("");
   const [limit, setLimit] = useState(50);
   const [title, setTitle] = useState(defaultTitles.known);
   const [titleTouched, setTitleTouched] = useState(false);
@@ -49,21 +57,51 @@ export function PlaylistPanel({ disabled = false }: { disabled?: boolean }) {
   const [error, setError] = useState<string | null>(null);
 
   const visibleTracks = useMemo(() => preview?.tracks.slice(0, 6) ?? [], [preview]);
+  const selectedFriend = friends.find((friend) => friend.friend.id === selectedFriendId);
+  const needsFriend = source === "friend_common";
+  const canPreview = !disabled && (!needsFriend || Boolean(selectedFriendId));
 
   useEffect(() => {
     if (!titleTouched) {
-      setTitle(defaultTitles[source]);
+      setTitle(
+        source === "friend_common" && selectedFriend
+          ? `Music Graph: общие с ${selectedFriend.friend.display_login}`
+          : defaultTitles[source]
+      );
     }
-  }, [source, titleTouched]);
+  }, [selectedFriend, source, titleTouched]);
 
   useEffect(() => {
     if (disabled) return;
+    let cancelled = false;
+    void api
+      .friends()
+      .then((response) => {
+        if (cancelled) return;
+        setFriends(response.friends);
+        if (!selectedFriendId && response.friends.length > 0) {
+          setSelectedFriendId(response.friends[0].friend.id);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setFriends([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [disabled, selectedFriendId]);
+
+  useEffect(() => {
+    if (!canPreview) {
+      setPreview(null);
+      return;
+    }
 
     let cancelled = false;
     setLoadingPreview(true);
     setError(null);
     void api
-      .playlistPreview({ source, limit })
+      .playlistPreview({ source, limit, friend_id: needsFriend ? selectedFriendId : null })
       .then((nextPreview) => {
         if (cancelled) return;
         setPreview(nextPreview);
@@ -80,7 +118,7 @@ export function PlaylistPanel({ disabled = false }: { disabled?: boolean }) {
     return () => {
       cancelled = true;
     };
-  }, [disabled, limit, source]);
+  }, [canPreview, limit, needsFriend, selectedFriendId, source]);
 
   async function createPlaylist() {
     if (!preview || preview.usableCount === 0) return;
@@ -96,6 +134,7 @@ export function PlaylistPanel({ disabled = false }: { disabled?: boolean }) {
       const response = await api.createPlaylist({
         source,
         limit,
+        friend_id: needsFriend ? selectedFriendId : null,
         title,
         visibility: "private"
       });
@@ -129,6 +168,28 @@ export function PlaylistPanel({ disabled = false }: { disabled?: boolean }) {
             ))}
           </select>
         </label>
+        {needsFriend && (
+          <label>
+            Друг
+            <select
+              value={selectedFriendId}
+              onChange={(event) => {
+                setTitleTouched(false);
+                setSelectedFriendId(event.target.value);
+              }}
+            >
+              {friends.length === 0 ? (
+                <option value="">Нет друзей</option>
+              ) : (
+                friends.map((friend) => (
+                  <option key={friend.id} value={friend.friend.id}>
+                    {friend.friend.display_login}
+                  </option>
+                ))
+              )}
+            </select>
+          </label>
+        )}
         <label>
           Лимит: {limit}
           <input

@@ -115,12 +115,13 @@ export type CompareResponse = {
   overlapPercent: number;
 };
 
-export type PlaylistSource = "known" | "liked" | "wave" | "graph";
+export type PlaylistSource = "known" | "liked" | "wave" | "graph" | "friend_common";
 
 export type PlaylistBuildRequest = {
   source: PlaylistSource;
   limit: number;
   artist_id?: string | null;
+  friend_id?: string | null;
 };
 
 export type PlaylistCreateRequest = PlaylistBuildRequest & {

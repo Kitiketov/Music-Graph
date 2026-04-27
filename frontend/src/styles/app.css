@@ -1053,7 +1053,7 @@ h2 {
 
 .playlist-controls {
   display: grid;
-  grid-template-columns: minmax(130px, 0.8fr) minmax(170px, 1fr) minmax(220px, 1.4fr);
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
   gap: 10px;
 }
 

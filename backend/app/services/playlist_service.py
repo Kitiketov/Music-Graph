@@ -7,10 +7,11 @@ from uuid import UUID
 
 from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.core.config import settings
 from app.core.security import decrypt_secret
-from app.db.models import Artist, Track, TrackArtist, User, UserListen, YandexCredential
+from app.db.models import Artist, Friendship, Track, TrackArtist, User, UserListen, YandexCredential
 from app.schemas.playlist import (
     PlaylistBuildRequest,
     PlaylistCreateRequest,
@@ -36,6 +37,7 @@ SOURCE_LABELS = {
     "liked": "Music Graph: лайкнутые треки",
     "wave": "Music Graph: волна",
     "graph": "Music Graph: треки из графа",
+    "friend_common": "Music Graph: пересечения с другом",
 }
 
 SOURCE_FILTERS = {
@@ -105,7 +107,40 @@ async def _music_token(db: AsyncSession, user_id: UUID) -> str:
 def _apply_source_filter(query, source: str):
     if source == "graph":
         return query.where(UserListen.source != "friend_playlist")
+    if source == "friend_common":
+        return query
     return query.where(UserListen.source.in_(SOURCE_FILTERS[source]))
+
+
+async def _friend_display_name(db: AsyncSession, *, user_id: UUID, friend_id: UUID | None) -> str | None:
+    if friend_id is None:
+        return None
+    result = await db.execute(
+        select(User.display_login)
+        .join(Friendship, Friendship.friend_id == User.id)
+        .where(Friendship.user_id == user_id, Friendship.friend_id == friend_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def _title_suggestion(db: AsyncSession, *, user_id: UUID, request: PlaylistBuildRequest) -> str:
+    if request.source != "friend_common":
+        return SOURCE_LABELS[request.source]
+    friend_name = await _friend_display_name(db, user_id=user_id, friend_id=request.friend_id)
+    if friend_name:
+        return f"Music Graph: общие с {friend_name}"
+    return SOURCE_LABELS[request.source]
+
+
+async def _ensure_friend_access(db: AsyncSession, *, user_id: UUID, friend_id: UUID | None) -> UUID:
+    if friend_id is None:
+        raise ValueError("Choose a friend for intersection playlist")
+    result = await db.execute(
+        select(Friendship.id).where(Friendship.user_id == user_id, Friendship.friend_id == friend_id)
+    )
+    if result.scalar_one_or_none() is None:
+        raise ValueError("Friendship not found")
+    return friend_id
 
 
 async def _playlist_candidates(
@@ -115,12 +150,23 @@ async def _playlist_candidates(
     request: PlaylistBuildRequest,
     overfetch: int = 3,
 ) -> tuple[list[PlaylistTrackCandidate], int]:
-    track_id_query = (
-        select(Track.id)
-        .join(UserListen, UserListen.track_id == Track.id)
-        .where(UserListen.user_id == user_id)
-    )
-    track_id_query = _apply_source_filter(track_id_query, request.source)
+    if request.source == "friend_common":
+        friend_id = await _ensure_friend_access(db, user_id=user_id, friend_id=request.friend_id)
+        my_listen = aliased(UserListen)
+        friend_listen = aliased(UserListen)
+        track_id_query = (
+            select(my_listen.track_id)
+            .join(friend_listen, friend_listen.track_id == my_listen.track_id)
+            .where(my_listen.user_id == user_id, friend_listen.user_id == friend_id)
+        )
+    else:
+        track_id_query = (
+            select(Track.id)
+            .join(UserListen, UserListen.track_id == Track.id)
+            .where(UserListen.user_id == user_id)
+        )
+        track_id_query = _apply_source_filter(track_id_query, request.source)
+
     if request.artist_id:
         track_id_query = track_id_query.where(
             Track.id.in_(select(TrackArtist.track_id).where(TrackArtist.artist_id == request.artist_id))
@@ -183,7 +229,7 @@ async def preview_playlist_tracks(
     skipped_without_album = max(0, min(len(candidates), request.limit) - len(usable))
     return PlaylistPreviewResponse(
         source=request.source,
-        titleSuggestion=SOURCE_LABELS[request.source],
+        titleSuggestion=await _title_suggestion(db, user_id=user_id, request=request),
         totalAvailable=total_available,
         usableCount=len(usable),
         skippedWithoutAlbum=skipped_without_album,

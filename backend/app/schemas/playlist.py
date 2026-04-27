@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from typing import Literal
+from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-PlaylistSource = Literal["known", "liked", "wave", "graph"]
+PlaylistSource = Literal["known", "liked", "wave", "graph", "friend_common"]
 PlaylistVisibility = Literal["private", "public"]
 
 
@@ -12,6 +13,7 @@ class PlaylistBuildRequest(BaseModel):
     source: PlaylistSource = "known"
     limit: int = Field(default=50, ge=1, le=100)
     artist_id: str | None = None
+    friend_id: UUID | None = None
 
 
 class PlaylistCreateRequest(PlaylistBuildRequest):

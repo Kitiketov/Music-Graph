@@ -25,7 +25,10 @@ async def preview_playlist(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> PlaylistPreviewResponse:
-    return await preview_playlist_tracks(db, user_id=user.id, request=payload)
+    try:
+        return await preview_playlist_tracks(db, user_id=user.id, request=payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
 @router.post("/create", response_model=PlaylistCreateResponse)
