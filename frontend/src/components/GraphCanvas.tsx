@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as d3 from "d3";
-import type { GraphEdge, GraphNode, GraphResponse } from "../types/api";
+import type { GraphEdge, GraphNode, GraphOverlayMatch, GraphResponse } from "../types/api";
 
 type Props = {
   graph: GraphResponse | null;
@@ -9,6 +9,8 @@ type Props = {
   showCollabEdges: boolean;
   showCatalogCollabEdges: boolean;
   showSimilarEdges: boolean;
+  overlayMatches?: Record<string, GraphOverlayMatch[]>;
+  highlightIntersections?: boolean;
 };
 
 type SimNode = GraphNode & d3.SimulationNodeDatum;
@@ -18,7 +20,10 @@ type SimEdge = Omit<GraphEdge, "source" | "target"> & {
 };
 
 function nodeWeight(node: GraphNode): number {
-  return typeof node.knownTrackCount === "number" ? node.knownTrackCount : node.listenCount;
+  if (typeof node.knownTrackCount === "number" && node.knownTrackCount > 0) {
+    return node.knownTrackCount;
+  }
+  return node.trackCount || node.listenCount;
 }
 
 function nodeRadius(node: GraphNode): number {
@@ -58,6 +63,18 @@ function endpointId(endpoint: SimNode | string): string {
   return typeof endpoint === "string" ? endpoint : endpoint.id;
 }
 
+function artistPairKey(left: string, right: string): string {
+  return [left, right].sort().join("::");
+}
+
+function edgePairKey(edge: Pick<GraphEdge, "source" | "target">): string {
+  return artistPairKey(edge.source, edge.target);
+}
+
+function simEdgePairKey(edge: SimEdge): string {
+  return artistPairKey(endpointId(edge.source), endpointId(edge.target));
+}
+
 function shouldShowLocalTrackCount(node: GraphNode): boolean {
   if (node.isSimilarOnly || node.trackCount <= 0) return false;
   return node.trackCount !== node.collectionTrackCount && node.trackCount !== node.knownTrackCount;
@@ -85,7 +102,9 @@ export function GraphCanvas({
   repulsionStrength,
   showCollabEdges,
   showCatalogCollabEdges,
-  showSimilarEdges
+  showSimilarEdges,
+  overlayMatches = {},
+  highlightIntersections = false
 }: Props) {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [hovered, setHovered] = useState<GraphNode | null>(null);
@@ -199,13 +218,35 @@ export function GraphCanvas({
   }, [focusedNodeId, visibleGraph]);
 
   const tooltipNode = hovered ?? focusedNode;
+  const tooltipOverlayMatches = tooltipNode ? overlayMatches[tooltipNode.id] ?? [] : [];
+  const intersectionNodeIds = useMemo(() => {
+    return new Set(
+      Object.entries(overlayMatches)
+        .filter(([, matches]) => matches.length > 0)
+        .map(([artistId]) => artistId)
+    );
+  }, [overlayMatches]);
+  const hasIntersectionHighlight = highlightIntersections && intersectionNodeIds.size > 0;
+  const listenedPairKeys = useMemo(() => {
+    return new Set((graph?.edges ?? []).filter((edge) => edge.type === "collab").map(edgePairKey));
+  }, [graph]);
+  const unheardKnownCollabNodeIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const edge of visibleGraph?.edges ?? []) {
+      if (edge.type !== "catalog_collab" || !listenedPairKeys.has(edgePairKey(edge))) continue;
+      ids.add(edge.source);
+      ids.add(edge.target);
+    }
+    return ids;
+  }, [listenedPairKeys, visibleGraph]);
+  const tooltipHasUnheardKnownCollabs = tooltipNode ? unheardKnownCollabNodeIds.has(tooltipNode.id) : false;
 
   const hoveredEdges = useMemo(() => {
     if (!visibleGraph || !tooltipNode) return [];
     return visibleGraph.edges
       .filter((edge) => edge.source === tooltipNode.id || edge.target === tooltipNode.id)
       .sort((left, right) => edgeTypePriority(left.type) - edgeTypePriority(right.type) || right.weight - left.weight)
-      .slice(0, 5);
+      .slice(0, 8);
   }, [tooltipNode, visibleGraph]);
 
   useEffect(() => {
@@ -224,7 +265,9 @@ export function GraphCanvas({
 
     const root = d3.select(svg);
     root.selectAll("*").remove();
-    root.attr("viewBox", `0 0 ${width} ${height}`);
+    root
+      .attr("viewBox", `0 0 ${width} ${height}`)
+      .classed("intersection-highlight-mode", hasIntersectionHighlight);
 
     const defs = root.append("defs");
     const zoomLayer = root.append("g");
@@ -250,7 +293,24 @@ export function GraphCanvas({
       .enter()
       .append("line")
       .attr("class", (edge) => `graph-edge ${edge.type}`)
-      .attr("stroke-width", (edge) => Math.max(1.4, Math.min(9, Math.sqrt(edge.weight) * 1.35)));
+      .attr("stroke-width", (edge) => Math.max(1.4, Math.min(9, Math.sqrt(edge.weight) * 1.35)))
+      .classed(
+        "is-intersection-link",
+        (edge) =>
+          hasIntersectionHighlight &&
+          (intersectionNodeIds.has(endpointId(edge.source)) || intersectionNodeIds.has(endpointId(edge.target)))
+      )
+      .classed(
+        "is-intersection-dimmed",
+        (edge) =>
+          hasIntersectionHighlight &&
+          !intersectionNodeIds.has(endpointId(edge.source)) &&
+          !intersectionNodeIds.has(endpointId(edge.target))
+      )
+      .classed(
+        "has-listened-collab",
+        (edge) => edge.type === "catalog_collab" && listenedPairKeys.has(simEdgePairKey(edge))
+      );
 
     const node = nodeLayer
       .selectAll("g")
@@ -260,8 +320,11 @@ export function GraphCanvas({
       .attr(
         "class",
         (item) =>
-          `graph-node ${item.isShared ? "shared" : ""} ${item.isSimilarOnly ? "similar" : ""} ${item.isCatalogOnly ? "catalog" : ""}`
-      );
+          `graph-node ${item.isShared ? "shared" : ""} ${overlayMatches[item.id]?.length ? "has-overlay-match" : ""} ${item.isSimilarOnly ? "similar" : ""} ${item.isCatalogOnly ? "catalog" : ""}`
+      )
+      .classed("is-intersection", (item) => intersectionNodeIds.has(item.id))
+      .classed("is-intersection-dimmed", (item) => hasIntersectionHighlight && !intersectionNodeIds.has(item.id))
+      .classed("has-unheard-known-collab", (item) => unheardKnownCollabNodeIds.has(item.id));
 
     function applyContext() {
       if (contextTiers.size === 0) {
@@ -368,6 +431,38 @@ export function GraphCanvas({
 
     node.append("circle").attr("r", radiusOf).attr("class", "node-ring");
 
+    node.each(function renderOverlayRings(item) {
+      const matches = overlayMatches[item.id] ?? [];
+      if (matches.length === 0) return;
+      const overlayGroup = d3.select(this).append("g").attr("class", "overlay-match-rings");
+      matches.slice(0, 5).forEach((match, index) => {
+        overlayGroup
+          .append("circle")
+          .attr("r", radiusOf(item) + 6 + index * 5)
+          .attr("class", "overlay-match-ring")
+          .attr("stroke", match.color);
+      });
+    });
+
+    const unheardBadge = node
+      .filter((item) => unheardKnownCollabNodeIds.has(item.id))
+      .append("g")
+      .attr("class", "unheard-collab-badge");
+
+    unheardBadge
+      .append("circle")
+      .attr("r", (item) => Math.max(7, radiusOf(item) * 0.18))
+      .attr("cx", (item) => -radiusOf(item) * 0.56)
+      .attr("cy", (item) => -radiusOf(item) * 0.52);
+
+    unheardBadge
+      .append("text")
+      .text("+")
+      .attr("x", (item) => -radiusOf(item) * 0.56)
+      .attr("y", (item) => -radiusOf(item) * 0.52)
+      .attr("dy", "0.34em")
+      .attr("text-anchor", "middle");
+
     const likedBadge = node.filter((item) => item.isLikedArtist).append("g").attr("class", "liked-badge");
 
     likedBadge
@@ -467,7 +562,16 @@ export function GraphCanvas({
       }
       simulation.stop();
     };
-  }, [contextTiers, repulsionStrength, visibleGraph]);
+  }, [
+    contextTiers,
+    hasIntersectionHighlight,
+    intersectionNodeIds,
+    listenedPairKeys,
+    overlayMatches,
+    repulsionStrength,
+    unheardKnownCollabNodeIds,
+    visibleGraph
+  ]);
 
   if (!graph) {
     return (
@@ -503,6 +607,12 @@ export function GraphCanvas({
           )}
         </div>
       )}
+      {hasIntersectionHighlight && (
+        <div className="intersection-mode-hint">
+          <strong>{intersectionNodeIds.size}</strong>
+          <span>общих артистов подсвечено</span>
+        </div>
+      )}
       <svg ref={svgRef} role="img" aria-label="music artist graph" />
       {tooltipNode && (
         <div className="graph-tooltip">
@@ -521,18 +631,43 @@ export function GraphCanvas({
           {tooltipNode.isSimilarOnly && <span>Похожий артист</span>}
           {tooltipNode.isShared && <span className="shared-pill">Общий артист</span>}
           {focusedNodeId === tooltipNode.id && <span className="shared-pill focus-pill">Фокус графа</span>}
+          {tooltipOverlayMatches.length > 0 && (
+            <span className="shared-pill overlay-pill">
+              Общий с: {tooltipOverlayMatches.map((match) => match.label).join(", ")}
+            </span>
+          )}
+          {tooltipOverlayMatches.some((match) => match.commonTracks.length > 0) && (
+            <div className="tooltip-common-tracks">
+              <span className="tooltip-links-title">Общие треки</span>
+              {tooltipOverlayMatches.map((match) =>
+                match.commonTracks.length > 0 ? (
+                  <span className="tooltip-link common-track-group" key={match.userId}>
+                    <b>{match.label}</b>
+                    <em>{match.commonTracks.slice(0, 8).join(", ")}</em>
+                  </span>
+                ) : null
+              )}
+            </div>
+          )}
+          {tooltipHasUnheardKnownCollabs && (
+            <span className="shared-pill unheard-pill">
+              Есть неслышанные коллабы с уже знакомой связью
+            </span>
+          )}
           {hoveredEdges.length > 0 && (
             <div className="tooltip-links">
               <span className="tooltip-links-title">Связи на графе</span>
               {hoveredEdges.map((edge) => {
                 const otherId = edge.source === tooltipNode.id ? edge.target : edge.source;
                 const tracks = edge.tracks.filter((track) => track.trim()).slice(0, 3);
+                const isUnheardKnownCollab = edge.type === "catalog_collab" && listenedPairKeys.has(edgePairKey(edge));
                 return (
                   <span className="tooltip-link" key={graphEdgeKey(edge)}>
                     <b>
                       {edgeTypeLabel(edge.type)} с {nodeNames.get(otherId) ?? otherId}
                     </b>
                     {tracks.length > 0 && <em>{tracks.join(", ")}</em>}
+                    {isUnheardKnownCollab && <em className="unheard-note">у этой пары уже есть прослушанная связь</em>}
                   </span>
                 );
               })}

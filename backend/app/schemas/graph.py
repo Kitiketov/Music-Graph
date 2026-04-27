@@ -13,6 +13,7 @@ class GraphNode(BaseModel):
     waveTrackCount: int | None = None
     collectionTrackCount: int | None = None
     collectionAlbumCount: int | None = None
+    listenedTracks: list[str] = Field(default_factory=list)
     isShared: bool = False
     isSimilarOnly: bool = False
     isCatalogOnly: bool = False

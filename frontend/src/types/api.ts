@@ -45,10 +45,20 @@ export type GraphNode = {
   waveTrackCount?: number | null;
   collectionTrackCount?: number | null;
   collectionAlbumCount?: number | null;
+  listenedTracks: string[];
   isShared: boolean;
   isSimilarOnly: boolean;
   isCatalogOnly: boolean;
   isLikedArtist: boolean;
+};
+
+export type GraphOverlayMatch = {
+  userId: string;
+  label: string;
+  color: string;
+  friendScore: number;
+  myScore: number;
+  commonTracks: string[];
 };
 
 export type GraphEdge = {

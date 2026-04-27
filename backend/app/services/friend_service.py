@@ -4,7 +4,7 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -68,3 +68,16 @@ async def list_friends(db: AsyncSession, user_id: UUID) -> list[FriendOut]:
         )
         for friendship, friend in result.all()
     ]
+
+
+async def remove_friend(db: AsyncSession, *, user_id: UUID, friend_id: UUID) -> bool:
+    result = await db.execute(
+        delete(Friendship).where(
+            or_(
+                (Friendship.user_id == user_id) & (Friendship.friend_id == friend_id),
+                (Friendship.user_id == friend_id) & (Friendship.friend_id == user_id),
+            )
+        )
+    )
+    await db.commit()
+    return bool(result.rowcount)

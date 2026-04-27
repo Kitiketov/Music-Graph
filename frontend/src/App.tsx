@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 import { Filter, LogOut, Search, SlidersHorizontal, Trash2 } from "lucide-react";
 import { api, clearToken, getToken } from "./api/client";
 import { FriendsPanel } from "./components/FriendsPanel";
@@ -6,7 +7,52 @@ import { GraphCanvas } from "./components/GraphCanvas";
 import { LoginScreen } from "./components/LoginScreen";
 import { SyncPanel } from "./components/SyncPanel";
 import { LEGAL_VERSION } from "./legal";
-import type { CompareResponse, GraphResponse, User } from "./types/api";
+import type { Friend, GraphOverlayMatch, GraphResponse, User } from "./types/api";
+
+const overlayPalette = ["#cf4b3f", "#2f6fbd", "#d79b28", "#7b61ff", "#e26d3d", "#139f8f"];
+
+type FriendGraphOverlay = {
+  userId: string;
+  label: string;
+  color: string;
+  graph: GraphResponse;
+};
+
+function overlayColorFor(userId: string): string {
+  const hash = [...userId].reduce((sum, char) => sum + char.charCodeAt(0), 0);
+  return overlayPalette[hash % overlayPalette.length];
+}
+
+function normalizeArtistName(name: string): string {
+  return name
+    .normalize("NFKC")
+    .toLocaleLowerCase("ru")
+    .replace(/ё/g, "е")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+}
+
+function normalizeTrackTitle(title: string): string {
+  return title
+    .normalize("NFKC")
+    .toLocaleLowerCase("ru")
+    .replace(/ё/g, "е")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+}
+
+function commonTrackTitles(leftTracks: string[] = [], rightTracks: string[] = []): string[] {
+  const rightNormalized = new Set(rightTracks.map(normalizeTrackTitle).filter(Boolean));
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const track of leftTracks) {
+    const normalized = normalizeTrackTitle(track);
+    if (!normalized || !rightNormalized.has(normalized) || seen.has(normalized)) continue;
+    seen.add(normalized);
+    result.push(track);
+  }
+  return result;
+}
 
 const dashboardGuide = [
   {
@@ -28,7 +74,25 @@ const dashboardGuide = [
 ];
 
 function graphNodeScore(node: GraphResponse["nodes"][number]) {
-  return node.listenCount || node.knownTrackCount || node.trackCount || 0;
+  if (typeof node.knownTrackCount === "number" && node.knownTrackCount > 0) {
+    return node.knownTrackCount;
+  }
+  return node.trackCount || node.listenCount || 0;
+}
+
+function graphNodeScoreLabel(node: GraphResponse["nodes"][number]) {
+  const score = graphNodeScore(node);
+  const parts = [`${score} знакомых`];
+  if (typeof node.waveTrackCount === "number" && node.waveTrackCount > 0) {
+    parts.push(`${node.waveTrackCount} из волны`);
+  }
+  if (typeof node.collectionTrackCount === "number" && node.collectionTrackCount > 0) {
+    parts.push(`${node.collectionTrackCount} в коллекции`);
+  }
+  if (node.trackCount > 0 && node.trackCount !== score) {
+    parts.push(`${node.trackCount} в графе`);
+  }
+  return parts.join(", ");
 }
 
 function GraphStatsPanel({ graph }: { graph: GraphResponse | null }) {
@@ -63,7 +127,7 @@ function GraphStatsPanel({ graph }: { graph: GraphResponse | null }) {
       <div className="stats-heading">
         <div>
           <p className="eyebrow">Статистика</p>
-          <h2>Топ-10 самых прослушиваемых артистов в графе</h2>
+          <h2>Топ-10 артистов по знакомым трекам</h2>
         </div>
         <div className="stats-summary">
           <span>
@@ -91,10 +155,7 @@ function GraphStatsPanel({ graph }: { graph: GraphResponse | null }) {
                 {artist.image ? <img src={artist.image} alt="" /> : <span className="artist-fallback">{artist.name[0]}</span>}
                 <div>
                   <strong>{artist.name}</strong>
-                  <p>
-                    {score} треков
-                    {typeof artist.waveTrackCount === "number" ? `, ${artist.waveTrackCount} из волны` : ""}
-                  </p>
+                  <p>{graphNodeScoreLabel(artist)}</p>
                   <span className="top-artist-bar">
                     <i style={{ width: `${Math.max(8, (score / stats.maxScore) * 100)}%` }} />
                   </span>
@@ -123,10 +184,111 @@ function GraphStatsPanel({ graph }: { graph: GraphResponse | null }) {
   );
 }
 
+function SharedArtistsPanel({
+  graph,
+  overlayMatches
+}: {
+  graph: GraphResponse | null;
+  overlayMatches: Record<string, GraphOverlayMatch[]>;
+}) {
+  const rows = useMemo(() => {
+    if (!graph) return [];
+    return graph.nodes
+      .map((artist) => {
+        const matches = overlayMatches[artist.id] ?? [];
+        if (matches.length === 0) return null;
+        const commonTracks = [...new Set(matches.flatMap((match) => match.commonTracks))];
+        const friendScore = matches.reduce((sum, match) => sum + match.friendScore, 0);
+        const myScore = graphNodeScore(artist);
+        return {
+          artist,
+          matches,
+          commonTracks,
+          myScore,
+          friendScore,
+          totalScore: myScore + friendScore
+        };
+      })
+      .filter((row): row is NonNullable<typeof row> => Boolean(row))
+      .sort(
+        (left, right) =>
+          right.totalScore - left.totalScore ||
+          right.commonTracks.length - left.commonTracks.length ||
+          left.artist.name.localeCompare(right.artist.name)
+      )
+      .slice(0, 12);
+  }, [graph, overlayMatches]);
+
+  if (!graph || rows.length === 0) return null;
+
+  return (
+    <section className="shared-artists-panel">
+      <div className="stats-heading">
+        <div>
+          <p className="eyebrow">Пересечения</p>
+          <h2>Самые пересеченные артисты по количеству знакомых песен</h2>
+        </div>
+        <div className="stats-summary">
+          <span>
+            <strong>{rows.length}</strong>
+            в топе
+          </span>
+          <span>
+            <strong>{rows.reduce((sum, row) => sum + row.commonTracks.length, 0)}</strong>
+            общих треков
+          </span>
+        </div>
+      </div>
+
+      <div className="shared-artists-list">
+        {rows.map((row, index) => (
+          <article className="shared-artist-row" key={row.artist.id}>
+            <span className="top-artist-rank">{index + 1}</span>
+            {row.artist.image ? (
+              <img src={row.artist.image} alt="" />
+            ) : (
+              <span className="artist-fallback">{row.artist.name[0]}</span>
+            )}
+            <div className="shared-artist-main">
+              <div className="shared-artist-title">
+                <strong>{row.artist.name}</strong>
+                <span>{row.totalScore} знакомых вместе</span>
+              </div>
+              <p>
+                у тебя {row.myScore}, у добавленных пользователей {row.friendScore}
+              </p>
+              <div className="shared-friend-dots">
+                {row.matches.map((match) => (
+                  <span style={{ "--overlay-color": match.color } as CSSProperties} key={match.userId}>
+                    <i />
+                    {match.label}
+                  </span>
+                ))}
+              </div>
+              {row.commonTracks.length > 0 ? (
+                <div className="common-track-chips">
+                  {row.commonTracks.slice(0, 5).map((track) => (
+                    <span key={track}>{track}</span>
+                  ))}
+                  {row.commonTracks.length > 5 && <span>+{row.commonTracks.length - 5}</span>}
+                </div>
+              ) : (
+                <em className="common-track-empty">Общие треки в синхронизированных данных пока не найдены</em>
+              )}
+            </div>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 export function App() {
   const [user, setUser] = useState<User | null>(null);
   const [graph, setGraph] = useState<GraphResponse | null>(null);
-  const [compare, setCompare] = useState<CompareResponse | null>(null);
+  const [friendOverlays, setFriendOverlays] = useState<FriendGraphOverlay[]>([]);
+  const friendOverlaysRef = useRef<FriendGraphOverlay[]>([]);
+  const [loadingOverlayIds, setLoadingOverlayIds] = useState<Set<string>>(new Set());
   const [limit, setLimit] = useState(100);
   const [minListens, setMinListens] = useState(1);
   const [search, setSearch] = useState("");
@@ -135,7 +297,7 @@ export function App() {
   const [showCollabs, setShowCollabs] = useState(true);
   const [showCatalogCollabs, setShowCatalogCollabs] = useState(false);
   const [showSimilar, setShowSimilar] = useState(false);
-  const [selectedFriendId, setSelectedFriendId] = useState<string | null>(null);
+  const [highlightIntersections, setHighlightIntersections] = useState(false);
   const [loadingGraph, setLoadingGraph] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -156,53 +318,211 @@ export function App() {
       .catch(() => clearToken());
   }, []);
 
+  useEffect(() => {
+    friendOverlaysRef.current = friendOverlays;
+  }, [friendOverlays]);
+
+  const graphParamsString = useMemo(() => {
+    const edgeTypes = ["collab", "catalog_collab", "similar"];
+    return new URLSearchParams({
+      limit: String(limit),
+      min_listens: String(minListens),
+      depth: String(graphDepth),
+      edge_types: edgeTypes.join(",")
+    }).toString();
+  }, [graphDepth, limit, minListens]);
+
   const loadGraph = useCallback(async () => {
     if (!user) return;
     setLoadingGraph(true);
     setError(null);
     try {
-      const edgeTypes = [
-        showCollabs ? "collab" : null,
-        "catalog_collab",
-        "similar"
-      ].filter(Boolean);
-      const params = new URLSearchParams({
-        limit: String(limit),
-        min_listens: String(minListens),
-        depth: String(graphDepth),
-        edge_types: edgeTypes.join(",")
-      });
-      let nextGraph: GraphResponse;
-      if (selectedFriendId) {
-        nextGraph = await api.graphUser(selectedFriendId, params);
-        setCompare(await api.compare(selectedFriendId));
-      } else {
-        nextGraph = await api.graphMe(params);
-        setCompare(null);
-      }
+      const nextGraph = await api.graphMe(new URLSearchParams(graphParamsString));
       setGraph(nextGraph);
     } catch (graphError) {
       setError(graphError instanceof Error ? graphError.message : "Граф не загрузился");
     } finally {
       setLoadingGraph(false);
     }
-  }, [
-    limit,
-    graphDepth,
-    minListens,
-    selectedFriendId,
-    showCollabs,
-    user
-  ]);
+  }, [graphParamsString, user]);
 
   useEffect(() => {
     void loadGraph();
   }, [loadGraph]);
 
+  const setOverlayLoading = useCallback((friendId: string, isLoading: boolean) => {
+    setLoadingOverlayIds((current) => {
+      const next = new Set(current);
+      if (isLoading) {
+        next.add(friendId);
+      } else {
+        next.delete(friendId);
+      }
+      return next;
+    });
+  }, []);
+
+  const toggleFriendOverlay = useCallback(
+    async (friend: Friend) => {
+      const friendId = friend.friend.id;
+      if (friendOverlaysRef.current.some((overlay) => overlay.userId === friendId)) {
+        setFriendOverlays((current) => current.filter((overlay) => overlay.userId !== friendId));
+        return;
+      }
+
+      setOverlayLoading(friendId, true);
+      setError(null);
+      try {
+        const friendGraph = await api.graphUser(friendId, new URLSearchParams(graphParamsString));
+        const overlay: FriendGraphOverlay = {
+          userId: friendId,
+          label: friend.friend.display_login,
+          color: overlayColorFor(friendId),
+          graph: friendGraph
+        };
+        setFriendOverlays((current) =>
+          current.some((item) => item.userId === friendId) ? current : [...current, overlay]
+        );
+      } catch (overlayError) {
+        setError(
+          overlayError instanceof Error
+            ? overlayError.message
+            : "Не получилось добавить друга на визуализацию"
+        );
+      } finally {
+        setOverlayLoading(friendId, false);
+      }
+    },
+    [graphParamsString, setOverlayLoading]
+  );
+
+  const handleFriendRemoved = useCallback((friendId: string) => {
+    setFriendOverlays((current) => current.filter((overlay) => overlay.userId !== friendId));
+    setLoadingOverlayIds((current) => {
+      const next = new Set(current);
+      next.delete(friendId);
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!user || friendOverlaysRef.current.length === 0) return;
+
+    let cancelled = false;
+    const overlaysToRefresh = friendOverlaysRef.current.map(({ userId, label, color }) => ({
+      userId,
+      label,
+      color
+    }));
+
+    overlaysToRefresh.forEach((overlay) => setOverlayLoading(overlay.userId, true));
+    void Promise.all(
+      overlaysToRefresh.map(async (overlay) => ({
+        ...overlay,
+        graph: await api.graphUser(overlay.userId, new URLSearchParams(graphParamsString))
+      }))
+    )
+      .then((nextOverlays) => {
+        if (cancelled) return;
+        setFriendOverlays((current) =>
+          nextOverlays.filter((overlay) => current.some((item) => item.userId === overlay.userId))
+        );
+      })
+      .catch((overlayError) => {
+        if (cancelled) return;
+        setError(
+          overlayError instanceof Error
+            ? overlayError.message
+            : "Не получилось обновить пересечения друзей"
+        );
+      })
+      .finally(() => {
+        if (cancelled) return;
+        overlaysToRefresh.forEach((overlay) => setOverlayLoading(overlay.userId, false));
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [graphParamsString, setOverlayLoading, user]);
+
+  useEffect(() => {
+    if (friendOverlays.length === 0) {
+      setHighlightIntersections(false);
+    }
+  }, [friendOverlays.length]);
+
+  const overlayFriendIds = useMemo(
+    () => friendOverlays.map((overlay) => overlay.userId),
+    [friendOverlays]
+  );
+
+  const loadingOverlayIdList = useMemo(
+    () => [...loadingOverlayIds],
+    [loadingOverlayIds]
+  );
+
+  const overlayStats = useMemo(() => {
+    if (!graph) return [];
+    return friendOverlays.map((overlay) => {
+      const friendIds = new Set(overlay.graph.nodes.map((node) => node.id));
+      const friendNames = new Set(
+        overlay.graph.nodes.map((node) => normalizeArtistName(node.name)).filter(Boolean)
+      );
+      const sharedCount = graph.nodes.filter((node) => {
+        const normalizedName = normalizeArtistName(node.name);
+        return friendIds.has(node.id) || (normalizedName && friendNames.has(normalizedName));
+      }).length;
+      const overlapPercent = graph.nodes.length > 0 ? Math.round((sharedCount / graph.nodes.length) * 1000) / 10 : 0;
+      return {
+        userId: overlay.userId,
+        label: overlay.label,
+        color: overlay.color,
+        sharedCount,
+        overlapPercent,
+        friendArtistCount: friendIds.size
+      };
+    });
+  }, [friendOverlays, graph]);
+
+  const overlayMatches = useMemo<Record<string, GraphOverlayMatch[]>>(() => {
+    if (!graph || friendOverlays.length === 0) return {};
+
+    const matches: Record<string, GraphOverlayMatch[]> = {};
+    for (const overlay of friendOverlays) {
+      const friendIds = new Set(overlay.graph.nodes.map((node) => node.id));
+      const friendNodesById = new Map(overlay.graph.nodes.map((node) => [node.id, node]));
+      const friendNodesByName = new Map(
+        overlay.graph.nodes.map((node) => [normalizeArtistName(node.name), node])
+      );
+      const friendNames = new Set(
+        overlay.graph.nodes.map((node) => normalizeArtistName(node.name)).filter(Boolean)
+      );
+      for (const artist of graph.nodes) {
+        const artistName = normalizeArtistName(artist.name);
+        if (!friendIds.has(artist.id) && (!artistName || !friendNames.has(artistName))) continue;
+        const friendNode = friendNodesById.get(artist.id) ?? friendNodesByName.get(artistName);
+        matches[artist.id] = [
+          ...(matches[artist.id] ?? []),
+          {
+            userId: overlay.userId,
+            label: overlay.label,
+            color: overlay.color,
+            myScore: graphNodeScore(artist),
+            friendScore: friendNode ? graphNodeScore(friendNode) : 0,
+            commonTracks: commonTrackTitles(artist.listenedTracks, friendNode?.listenedTracks ?? [])
+          }
+        ];
+      }
+    }
+    return matches;
+  }, [friendOverlays, graph]);
+
   function logout() {
     clearToken();
     setUser(null);
     setGraph(null);
+    setFriendOverlays([]);
   }
 
   async function deleteAccount() {
@@ -216,7 +536,7 @@ export function App() {
       clearToken();
       setUser(null);
       setGraph(null);
-      setCompare(null);
+      setFriendOverlays([]);
     } catch (deleteError) {
       setError(deleteError instanceof Error ? deleteError.message : "Не удалось удалить данные");
     }
@@ -265,22 +585,12 @@ export function App() {
 
       <section className="layout">
         <aside className="left-rail">
-          <FriendsPanel selectedFriendId={selectedFriendId} onSelectFriend={setSelectedFriendId} />
-          <section className="side-panel source-panel">
-            <h2>Источники</h2>
-            {Object.keys(graph?.sourceStatus ?? {}).length === 0 ? (
-              <p className="muted small">Нет данных sync</p>
-            ) : (
-              Object.entries(graph?.sourceStatus ?? {})
-                .filter(([key]) => !key.startsWith("_"))
-                .map(([key, value]) => (
-                  <p className="source-row" key={key}>
-                    <span>{key}</span>
-                    <strong>{value}</strong>
-                  </p>
-                ))
-            )}
-          </section>
+          <FriendsPanel
+            overlayFriendIds={overlayFriendIds}
+            loadingOverlayIds={loadingOverlayIdList}
+            onToggleOverlayFriend={(friend) => void toggleFriendOverlay(friend)}
+            onFriendRemoved={handleFriendRemoved}
+          />
         </aside>
 
         <section className="workspace">
@@ -365,6 +675,22 @@ export function App() {
               />
               Похожие
             </label>
+            <label
+              className="toggle-chip intersection-toggle"
+              title={
+                friendOverlays.length === 0
+                  ? "Сначала добавь друга кнопкой + в панели друзей"
+                  : "Приглушить все не-общие вершины и оставить яркими пересечения с добавленными пользователями"
+              }
+            >
+              <input
+                type="checkbox"
+                checked={highlightIntersections}
+                disabled={friendOverlays.length === 0}
+                onChange={(event) => setHighlightIntersections(event.target.checked)}
+              />
+              Пересечения
+            </label>
             <button
               className="icon-button wide"
               disabled={loadingGraph}
@@ -375,12 +701,27 @@ export function App() {
             </button>
           </section>
 
-          {compare && (
-            <section className="comparison-strip">
-              <strong>{compare.sharedCount}</strong>
-              <span>общих артистов</span>
-              <strong>{compare.overlapPercent}%</strong>
-              <span>пересечение графов</span>
+          {overlayStats.length > 0 && (
+            <section className="comparison-strip overlay-strip">
+              <span>Пересечения на графе</span>
+              {overlayStats.map((item) => (
+                <button
+                  className="overlay-stat-chip"
+                  key={item.userId}
+                  onClick={() =>
+                    setFriendOverlays((current) =>
+                      current.filter((overlay) => overlay.userId !== item.userId)
+                    )
+                  }
+                  style={{ "--overlay-color": item.color } as CSSProperties}
+                  title="Убрать пользователя с визуализации"
+                  type="button"
+                >
+                  <i />
+                  <strong>{item.sharedCount}</strong>
+                  <span>{item.label}, {item.overlapPercent}%</span>
+                </button>
+              ))}
             </section>
           )}
 
@@ -392,7 +733,10 @@ export function App() {
             showCollabEdges={showCollabs}
             showCatalogCollabEdges={showCatalogCollabs}
             showSimilarEdges={showSimilar}
+            overlayMatches={overlayMatches}
+            highlightIntersections={highlightIntersections}
           />
+          <SharedArtistsPanel graph={graph} overlayMatches={overlayMatches} />
           <GraphStatsPanel graph={graph} />
         </section>
       </section>

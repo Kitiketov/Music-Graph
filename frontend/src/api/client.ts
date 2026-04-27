@@ -76,5 +76,6 @@ export const api = {
       body: JSON.stringify({ code })
     }),
   compare: (friendId: string) => request<CompareResponse>(`/compare/${friendId}`),
+  deleteFriend: (friendId: string) => request<void>(`/friends/${friendId}`, { method: "DELETE" }),
   deleteMe: () => request<void>("/me", { method: "DELETE" })
 };

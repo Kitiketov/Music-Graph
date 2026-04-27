@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,7 +10,7 @@ from app.core.deps import get_current_user
 from app.db.models import User
 from app.db.session import get_db
 from app.schemas.friends import FriendsResponse, InviteAcceptRequest, InviteCreateResponse
-from app.services.friend_service import accept_invite, create_invite, invite_url, list_friends
+from app.services.friend_service import accept_invite, create_invite, invite_url, list_friends, remove_friend
 
 router = APIRouter()
 
@@ -45,3 +46,14 @@ async def friends(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> FriendsResponse:
     return FriendsResponse(friends=await list_friends(db, user.id))
+
+
+@router.delete("/{friend_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_friend(
+    friend_id: UUID,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> None:
+    removed = await remove_friend(db, user_id=user.id, friend_id=friend_id)
+    if not removed:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Friendship not found")

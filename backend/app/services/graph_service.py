@@ -63,6 +63,7 @@ def _node_from_artist(
         waveTrackCount=item.get("waveTrackCount"),
         collectionTrackCount=item.get("collectionTrackCount"),
         collectionAlbumCount=item.get("collectionAlbumCount"),
+        listenedTracks=item.get("listenedTracks", []),
         isLikedArtist=item.get("isLikedArtist", False),
         isSimilarOnly=is_similar_only,
         isCatalogOnly=is_catalog_only,
@@ -154,9 +155,11 @@ async def _listened_artist_stats(db: AsyncSession, user_id: UUID) -> dict[str, d
             func.max(UserArtistStat.collection_track_count).label("collection_track_count"),
             func.max(UserArtistStat.collection_album_count).label("collection_album_count"),
             func.bool_or(UserArtistStat.is_liked_artist).label("is_liked_artist"),
+            func.array_agg(func.distinct(Track.title)).label("listened_tracks"),
         )
         .join(TrackArtist, TrackArtist.artist_id == Artist.id)
         .join(UserListen, UserListen.track_id == TrackArtist.track_id)
+        .join(Track, Track.id == UserListen.track_id)
         .outerjoin(
             UserArtistStat,
             and_(UserArtistStat.user_id == user_id, UserArtistStat.artist_id == Artist.id),
@@ -176,6 +179,7 @@ async def _listened_artist_stats(db: AsyncSession, user_id: UUID) -> dict[str, d
             "collectionTrackCount": int(collection_track_count) if collection_track_count is not None else None,
             "collectionAlbumCount": int(collection_album_count) if collection_album_count is not None else None,
             "isLikedArtist": bool(is_liked_artist),
+            "listenedTracks": sorted({track for track in (listened_tracks or []) if track})[:80],
         }
         for (
             artist_id,
@@ -188,6 +192,7 @@ async def _listened_artist_stats(db: AsyncSession, user_id: UUID) -> dict[str, d
             collection_track_count,
             collection_album_count,
             is_liked_artist,
+            listened_tracks,
         ) in result.all()
     }
 
@@ -219,6 +224,7 @@ async def _known_artist_stats(db: AsyncSession, user_id: UUID) -> dict[str, dict
             "collectionTrackCount": int(collection_track_count),
             "collectionAlbumCount": int(collection_album_count),
             "isLikedArtist": bool(is_liked_artist),
+            "listenedTracks": [],
         }
         for (
             artist_id,
@@ -235,7 +241,13 @@ async def _known_artist_stats(db: AsyncSession, user_id: UUID) -> dict[str, dict
 
 async def artist_ids_for_user(db: AsyncSession, user_id: UUID) -> set[str]:
     stats = await _listened_artist_stats(db, user_id)
-    return set(stats)
+    known_stats = await _known_artist_stats(db, user_id)
+    known_ids = {
+        artist_id
+        for artist_id, item in known_stats.items()
+        if (item.get("knownTrackCount") or 0) > 0
+    }
+    return set(stats) | known_ids
 
 
 async def are_friends(db: AsyncSession, user_id: UUID, friend_id: UUID) -> bool:
@@ -273,7 +285,7 @@ async def build_user_graph(
     ranked = sorted(
         (item for item in stats.values() if item["listenCount"] >= min_listens),
         key=lambda item: (
-            item["knownTrackCount"] or item["listenCount"],
+            item["knownTrackCount"] or item["trackCount"] or item["listenCount"],
             item["listenCount"],
             item["trackCount"],
             item["name"].lower(),
@@ -323,6 +335,7 @@ async def build_user_graph(
             waveTrackCount=item["waveTrackCount"],
             collectionTrackCount=item["collectionTrackCount"],
             collectionAlbumCount=item["collectionAlbumCount"],
+            listenedTracks=item["listenedTracks"],
             isLikedArtist=item.get("isLikedArtist", False),
         )
         for item in selected
@@ -404,7 +417,7 @@ async def build_user_graph(
             )
 
     if shared_with_user_id:
-        shared_ids = set(stats) & await artist_ids_for_user(db, shared_with_user_id)
+        shared_ids = await artist_ids_for_user(db, owner_id) & await artist_ids_for_user(db, shared_with_user_id)
         mark_shared_nodes(nodes, shared_ids)
 
     return GraphResponse(
