@@ -20,7 +20,12 @@ from app.schemas.auth import (
     QrStatusResponse,
     UserOut,
 )
-from app.services.auth_service import get_device_status, get_qr_status, start_device_login, start_qr_login
+from app.services.auth_service import (
+    get_device_status,
+    get_qr_status,
+    start_device_login,
+    start_qr_login,
+)
 
 router = APIRouter()
 

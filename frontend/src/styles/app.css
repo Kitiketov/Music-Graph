@@ -524,6 +524,12 @@ h2 {
   min-height: 38px;
 }
 
+.secondary-action.active-login-method {
+  color: white;
+  background: var(--green-deep);
+  border-color: var(--green-deep);
+}
+
 .icon-button {
   background: var(--panel);
   color: var(--ink);

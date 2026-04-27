@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { Copy, ExternalLink, Music2, Network, RefreshCcw, ShieldCheck, Users } from "lucide-react";
+import { Copy, ExternalLink, Music2, Network, RefreshCcw, ShieldCheck, Smartphone, Users } from "lucide-react";
 import { api, setToken } from "../api/client";
 import { LEGAL_VERSION, legalSummary, privacyText, termsText } from "../legal";
-import type { QrStartResponse, User } from "../types/api";
+import type { DeviceStartResponse, QrStartResponse, User } from "../types/api";
 
 type Props = {
   onLogin: (user: User) => void;
@@ -36,6 +36,9 @@ const serviceSteps = [
 export function LoginScreen({ onLogin }: Props) {
   const qrWindowRef = useRef<Window | null>(null);
   const [qr, setQr] = useState<QrStartResponse | null>(null);
+  const [device, setDevice] = useState<DeviceStartResponse | null>(null);
+  const [authMethod, setAuthMethod] = useState<"qr" | "device">("qr");
+  const [isMobileDevice, setIsMobileDevice] = useState(false);
   const [status, setStatus] = useState("Прими соглашение, чтобы создать QR-вход");
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
@@ -44,14 +47,27 @@ export function LoginScreen({ onLogin }: Props) {
   const [starting, setStarting] = useState(false);
 
   useEffect(() => {
-    if (!qr) return undefined;
+    if (typeof window === "undefined") return;
+    const ua = navigator.userAgent.toLowerCase();
+    const coarsePointer = window.matchMedia("(pointer: coarse)").matches;
+    const mobileUa = /android|iphone|ipad|ipod|windows phone|mobile/i.test(ua);
+    setIsMobileDevice(mobileUa || coarsePointer);
+    if (mobileUa || coarsePointer) {
+      setAuthMethod("device");
+    }
+  }, []);
+
+  useEffect(() => {
+    const activeSessionId = authMethod === "device" ? device?.session_id : qr?.session_id;
+    if (!activeSessionId) return undefined;
 
     let cancelled = false;
     let timer: number | undefined;
 
     timer = window.setInterval(async () => {
       try {
-        const state = await api.qrStatus(qr.session_id);
+        const state =
+          authMethod === "device" ? await api.deviceStatus(activeSessionId) : await api.qrStatus(activeSessionId);
         if (cancelled) return;
 
         if (state.status === "confirmed" && state.access_token && state.user) {
@@ -68,10 +84,20 @@ export function LoginScreen({ onLogin }: Props) {
           return;
         }
 
-        setStatus("Жду подтверждение QR-входа в Яндексе...");
+        setStatus(
+          authMethod === "device"
+            ? "Жду подтверждение входа по коду в Яндексе..."
+            : "Жду подтверждение QR-входа в Яндексе..."
+        );
       } catch (pollError) {
         if (!cancelled) {
-          setError(pollError instanceof Error ? pollError.message : "Не удалось проверить QR-вход");
+          setError(
+            pollError instanceof Error
+              ? pollError.message
+              : authMethod === "device"
+                ? "Не удалось проверить вход по коду устройства"
+                : "Не удалось проверить QR-вход"
+          );
         }
       }
     }, 1500);
@@ -83,7 +109,13 @@ export function LoginScreen({ onLogin }: Props) {
       }
       closeQrWindow();
     };
-  }, [onLogin, qr]);
+  }, [authMethod, device?.session_id, onLogin, qr?.session_id]);
+
+  useEffect(() => {
+    if (!qr || authMethod !== "qr" || isMobileDevice) return;
+    openQrWindow();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authMethod, isMobileDevice, qr?.session_id]);
 
   function closeQrWindow() {
     const qrWindow = qrWindowRef.current;
@@ -134,6 +166,7 @@ export function LoginScreen({ onLogin }: Props) {
     setStarting(true);
     setError(null);
     setCopied(null);
+    setDevice(null);
     setQr(null);
     setStatus("Создаем QR-страницу авторизации Яндекса...");
 
@@ -144,9 +177,38 @@ export function LoginScreen({ onLogin }: Props) {
         privacy_version: LEGAL_VERSION
       });
       setQr(started);
-      setStatus("Открой QR отдельным окном и подтверди вход");
+      setStatus("Открываю QR-окно. Подтверди вход в Яндексе...");
     } catch (startError) {
       setError(startError instanceof Error ? startError.message : "Не удалось создать QR-вход через Яндекс");
+    } finally {
+      setStarting(false);
+    }
+  }
+
+  async function startDeviceLogin() {
+    if (!accepted) {
+      setError("Сначала нужно принять пользовательское соглашение и политику обработки данных");
+      return;
+    }
+
+    closeQrWindow();
+    setStarting(true);
+    setError(null);
+    setCopied(null);
+    setQr(null);
+    setDevice(null);
+    setStatus("Создаем код входа для мобильного устройства...");
+
+    try {
+      const started = await api.startDevice({
+        accepted_terms: true,
+        terms_version: LEGAL_VERSION,
+        privacy_version: LEGAL_VERSION
+      });
+      setDevice(started);
+      setStatus("Открой страницу Яндекса и подтверди вход кодом");
+    } catch (startError) {
+      setError(startError instanceof Error ? startError.message : "Не удалось создать вход по коду устройства");
     } finally {
       setStarting(false);
     }
@@ -162,6 +224,36 @@ export function LoginScreen({ onLogin }: Props) {
     } catch {
       setError("Не удалось скопировать QR-ссылку. Открой ее кнопкой ниже.");
     }
+  }
+
+  async function copyDeviceCode() {
+    if (!device) return;
+    try {
+      await navigator.clipboard.writeText(device.user_code);
+      setCopied("Код входа скопирован");
+      window.setTimeout(() => setCopied(null), 1800);
+    } catch {
+      setError("Не удалось скопировать код. Введи его вручную.");
+    }
+  }
+
+  async function copyDeviceLink() {
+    if (!device) return;
+    try {
+      await navigator.clipboard.writeText(device.verification_url);
+      setCopied("Ссылка подтверждения скопирована");
+      window.setTimeout(() => setCopied(null), 1800);
+    } catch {
+      setError("Не удалось скопировать ссылку подтверждения");
+    }
+  }
+
+  function startSelectedLogin() {
+    if (authMethod === "device") {
+      void startDeviceLogin();
+      return;
+    }
+    void startQrLogin();
   }
 
   return (
@@ -197,8 +289,8 @@ export function LoginScreen({ onLogin }: Props) {
           <p className="eyebrow">Music Graph</p>
           <h1>QR-вход Яндекс</h1>
           <p className="muted">
-            Сначала прими условия хранения музыкальных данных. Потом открой QR-страницу Яндекса,
-            отсканируй QR и оставь этот сайт открытым.
+            Сначала прими условия хранения музыкальных данных. Затем выбери вход через QR или через код устройства
+            (удобно на мобильном), подтверди вход в Яндексе и оставь этот сайт открытым.
           </p>
         </div>
 
@@ -284,23 +376,36 @@ export function LoginScreen({ onLogin }: Props) {
           <span>{error ?? status}</span>
         </div>
 
-        {qr ? (
-          <div className="qr-login-box">
-            <button className="primary-action yandex-action" onClick={openQrWindow}>
-              <ExternalLink size={18} />
-              Открыть QR отдельным окном
-            </button>
+        <div className="login-copy-actions">
+          <button
+            className={`secondary-action compact ${authMethod === "qr" ? "active-login-method" : ""}`}
+            type="button"
+            onClick={() => setAuthMethod("qr")}
+          >
+            QR-вход
+          </button>
+          <button
+            className={`secondary-action compact ${authMethod === "device" ? "active-login-method" : ""}`}
+            type="button"
+            onClick={() => setAuthMethod("device")}
+          >
+            Код устройства
+            {isMobileDevice && <Smartphone size={15} />}
+          </button>
+        </div>
 
-            <a
-              className="secondary-action yandex-action"
-              href={qr.qr_url}
-              target="_blank"
-              rel="noreferrer"
-              onClick={() => setStatus("Жду подтверждение QR-входа в Яндексе...")}
-            >
-              <ExternalLink size={18} />
-              Открыть QR-ссылку здесь
-            </a>
+        {authMethod === "qr" && qr ? (
+          <div className="qr-login-box">
+            {isMobileDevice && (
+              <a
+                className="primary-action yandex-action"
+                href={qr.qr_url}
+                onClick={() => setStatus("Открываю QR-ссылку, проверь переход в Яндекс...")}
+              >
+                <Smartphone size={18} />
+                Открыть в приложении Яндекса
+              </a>
+            )}
 
             <button className="secondary-action" onClick={() => void copyQrLink()}>
               <Copy size={17} />
@@ -308,22 +413,55 @@ export function LoginScreen({ onLogin }: Props) {
             </button>
 
             <p className="muted small">
-              Если открылось вкладкой, значит браузер запрещает pop-up окна для этой страницы.
-              После успешного входа отдельное окно закроется автоматически.
+              На компьютере QR открывается автоматически после создания. Если браузер запретил pop-up, разреши его
+              и нажми "Создать новый QR". После успешного входа окно закроется автоматически.
             </p>
 
             {copied && <p className="copy-status">{copied}</p>}
           </div>
+        ) : authMethod === "device" && device ? (
+          <div className="device-login-box">
+            <p>Открой страницу подтверждения Яндекса и введи код:</p>
+            <code className="device-code">{device.user_code}</code>
+
+            <a
+              className="primary-action yandex-action"
+              href={device.verification_url}
+              target="_blank"
+              rel="noreferrer"
+              onClick={() => setStatus("Открой страницу Яндекса и введи код входа")}
+            >
+              <ExternalLink size={18} />
+              Открыть страницу подтверждения
+            </a>
+
+            <button className="secondary-action" onClick={() => void copyDeviceCode()}>
+              <Copy size={17} />
+              Скопировать код
+            </button>
+            <button className="secondary-action" onClick={() => void copyDeviceLink()}>
+              <Copy size={17} />
+              Скопировать ссылку
+            </button>
+
+            {copied && <p className="copy-status">{copied}</p>}
+          </div>
         ) : (
-          <button className="primary-action" disabled={!accepted || starting} onClick={() => void startQrLogin()}>
-            {starting ? "Создаем QR-вход..." : "Принять и создать QR"}
+          <button className="primary-action" disabled={!accepted || starting} onClick={startSelectedLogin}>
+            {starting
+              ? authMethod === "device"
+                ? "Создаем код входа..."
+                : "Создаем QR-вход..."
+              : authMethod === "device"
+                ? "Принять и создать код входа"
+                : "Принять и создать QR"}
           </button>
         )}
 
-        {qr && (
-          <button className="secondary-action" disabled={!accepted || starting} onClick={() => void startQrLogin()}>
+        {(qr || device) && (
+          <button className="secondary-action" disabled={!accepted || starting} onClick={startSelectedLogin}>
             <RefreshCcw size={18} />
-            Создать новый QR
+            {authMethod === "device" ? "Создать новый код" : "Создать новый QR"}
           </button>
         )}
       </section>
