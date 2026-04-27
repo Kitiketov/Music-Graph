@@ -114,3 +114,43 @@ export type CompareResponse = {
   friendArtistCount: number;
   overlapPercent: number;
 };
+
+export type PlaylistSource = "known" | "liked" | "wave" | "graph";
+
+export type PlaylistBuildRequest = {
+  source: PlaylistSource;
+  limit: number;
+  artist_id?: string | null;
+};
+
+export type PlaylistCreateRequest = PlaylistBuildRequest & {
+  title: string;
+  visibility: "private" | "public";
+};
+
+export type PlaylistTrack = {
+  id: string;
+  title: string;
+  artists: string[];
+  cover?: string | null;
+  albumId?: string | null;
+  sources: string[];
+};
+
+export type PlaylistPreviewResponse = {
+  source: PlaylistSource;
+  titleSuggestion: string;
+  totalAvailable: number;
+  usableCount: number;
+  skippedWithoutAlbum: number;
+  tracks: PlaylistTrack[];
+};
+
+export type PlaylistCreateResponse = {
+  title: string;
+  kind: string | number;
+  url?: string | null;
+  addedCount: number;
+  skippedWithoutAlbum: number;
+  tracks: PlaylistTrack[];
+};

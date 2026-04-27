@@ -5,6 +5,10 @@ import type {
   FriendsResponse,
   GraphResponse,
   InviteCreateResponse,
+  PlaylistBuildRequest,
+  PlaylistCreateRequest,
+  PlaylistCreateResponse,
+  PlaylistPreviewResponse,
   QrStartResponse,
   QrStatusResponse,
   SyncStartResponse,
@@ -76,6 +80,16 @@ export const api = {
       body: JSON.stringify({ code })
     }),
   compare: (friendId: string) => request<CompareResponse>(`/compare/${friendId}`),
+  playlistPreview: (payload: PlaylistBuildRequest) =>
+    request<PlaylistPreviewResponse>("/playlists/preview", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
+  createPlaylist: (payload: PlaylistCreateRequest) =>
+    request<PlaylistCreateResponse>("/playlists/create", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
   deleteFriend: (friendId: string) => request<void>(`/friends/${friendId}`, { method: "DELETE" }),
   deleteMe: () => request<void>("/me", { method: "DELETE" })
 };

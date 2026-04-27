@@ -5,6 +5,7 @@ import { api, clearToken, getToken } from "./api/client";
 import { FriendsPanel } from "./components/FriendsPanel";
 import { GraphCanvas } from "./components/GraphCanvas";
 import { LoginScreen } from "./components/LoginScreen";
+import { PlaylistPanel } from "./components/PlaylistPanel";
 import { SyncPanel } from "./components/SyncPanel";
 import { LEGAL_VERSION } from "./legal";
 import type { Friend, GraphOverlayMatch, GraphResponse, User } from "./types/api";
@@ -700,6 +701,8 @@ export function App() {
               Обновить граф
             </button>
           </section>
+
+          <PlaylistPanel disabled={!graph || graph.nodes.length === 0} />
 
           {overlayStats.length > 0 && (
             <section className="comparison-strip overlay-strip">
