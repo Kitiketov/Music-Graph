@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as d3 from "d3";
-import type { GraphEdge, GraphNode, GraphOverlayMatch, GraphResponse } from "../types/api";
+import type { GraphCluster, GraphEdge, GraphNode, GraphOverlayMatch, GraphResponse } from "../types/api";
 
 type Props = {
   graph: GraphResponse | null;
@@ -11,6 +11,11 @@ type Props = {
   showSimilarEdges: boolean;
   overlayMatches?: Record<string, GraphOverlayMatch[]>;
   highlightIntersections?: boolean;
+  showIslands?: boolean;
+  hoveredClusterId?: string | null;
+  activeClusterId?: string | null;
+  onHoverCluster?: (clusterId: string | null) => void;
+  onSelectCluster?: (clusterId: string | null) => void;
 };
 
 type SimNode = GraphNode & d3.SimulationNodeDatum;
@@ -18,7 +23,10 @@ type SimEdge = Omit<GraphEdge, "source" | "target"> & {
   source: SimNode | string;
   target: SimNode | string;
 };
-type CachedPosition = Pick<d3.SimulationNodeDatum, "x" | "y" | "vx" | "vy">;
+
+type VisibleCluster = GraphCluster & {
+  visibleNodeIds: string[];
+};
 
 function nodeWeight(node: GraphNode): number {
   if (typeof node.knownTrackCount === "number" && node.knownTrackCount > 0) {
@@ -97,27 +105,20 @@ function graphEdgeKey(edge: GraphEdge): string {
   return `${edge.type}:${edge.source}:${edge.target}`;
 }
 
-function numericHash(value: string): number {
-  let hash = 2166136261;
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
+function clusterHullPath(clusterNodes: SimNode[], radiusOf: (item: GraphNode) => number): string | null {
+  const points: [number, number][] = [];
+  for (const node of clusterNodes) {
+    const x = node.x ?? 0;
+    const y = node.y ?? 0;
+    const radius = radiusOf(node) + 34;
+    for (let index = 0; index < 6; index += 1) {
+      const angle = (Math.PI * 2 * index) / 6;
+      points.push([x + Math.cos(angle) * radius, y + Math.sin(angle) * radius]);
+    }
   }
-  return hash >>> 0;
-}
-
-function seedNodePosition(node: SimNode, index: number, width: number, height: number): SimNode {
-  const hash = numericHash(node.id);
-  const angle = (hash / 0xffffffff) * Math.PI * 2;
-  const ring = 0.18 + (index % 11) * 0.035;
-  const radius = Math.min(width, height) * ring;
-  return {
-    ...node,
-    x: width / 2 + Math.cos(angle) * radius,
-    y: height / 2 + Math.sin(angle) * radius,
-    vx: 0,
-    vy: 0
-  };
+  const hull = d3.polygonHull(points);
+  if (!hull) return null;
+  return `M${hull.map(([x, y]) => `${x},${y}`).join("L")}Z`;
 }
 
 export function GraphCanvas({
@@ -128,13 +129,24 @@ export function GraphCanvas({
   showCatalogCollabEdges,
   showSimilarEdges,
   overlayMatches = {},
-  highlightIntersections = false
+  highlightIntersections = false,
+  showIslands = false,
+  hoveredClusterId = null,
+  activeClusterId = null,
+  onHoverCluster,
+  onSelectCluster
 }: Props) {
   const svgRef = useRef<SVGSVGElement | null>(null);
-  const positionCacheRef = useRef<Map<string, CachedPosition>>(new Map());
+  const activeClusterIdRef = useRef<string | null>(activeClusterId);
+  const hoveredClusterIdRef = useRef<string | null>(hoveredClusterId);
   const [hovered, setHovered] = useState<GraphNode | null>(null);
   const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
   const normalizedSearch = search.trim().toLowerCase();
+
+  useEffect(() => {
+    activeClusterIdRef.current = activeClusterId;
+    hoveredClusterIdRef.current = hoveredClusterId;
+  }, [activeClusterId, hoveredClusterId]);
 
   const visibleEdgeTypes = useMemo(() => {
     const types = new Set<string>();
@@ -225,6 +237,24 @@ export function GraphCanvas({
 
   const visibleGraph = graphContext.graph;
   const contextTiers = graphContext.tiers;
+  const visibleClusters = useMemo<VisibleCluster[]>(() => {
+    if (!visibleGraph?.clusters?.length) return [];
+    const visibleNodeIds = new Set(visibleGraph.nodes.map((node) => node.id));
+    return visibleGraph.clusters
+      .map((cluster) => ({
+        ...cluster,
+        visibleNodeIds: cluster.nodeIds.filter((nodeId) => visibleNodeIds.has(nodeId))
+      }))
+      .filter((cluster) => cluster.visibleNodeIds.length > 1);
+  }, [visibleGraph]);
+  const clusterById = useMemo(() => {
+    return new Map(visibleClusters.map((cluster) => [cluster.id, cluster]));
+  }, [visibleClusters]);
+  const highlightedClusterId = activeClusterId ?? hoveredClusterId;
+  const highlightedCluster = highlightedClusterId ? clusterById.get(highlightedClusterId) ?? null : null;
+  const highlightedClusterNodeIds = useMemo(() => {
+    return new Set(highlightedCluster?.visibleNodeIds ?? []);
+  }, [highlightedCluster]);
 
   useEffect(() => {
     if (!focusedNodeId || !filteredGraph) return;
@@ -280,47 +310,52 @@ export function GraphCanvas({
 
     const width = svg.clientWidth || 960;
     const height = svg.clientHeight || 640;
-    const positionCache = positionCacheRef.current;
-    const nodes: SimNode[] = visibleGraph.nodes.map((node, index) => {
-      const cached = positionCache.get(node.id);
-      if (
-        cached &&
-        Number.isFinite(cached.x) &&
-        Number.isFinite(cached.y)
-      ) {
-        return {
-          ...node,
-          x: cached.x,
-          y: cached.y,
-          vx: cached.vx ?? 0,
-          vy: cached.vy ?? 0
-        };
-      }
-      return seedNodePosition({ ...node }, index, width, height);
-    });
+    const nodes: SimNode[] = visibleGraph.nodes.map((node) => ({ ...node }));
     const nodeMap = new Map(nodes.map((node) => [node.id, node]));
     const links: SimEdge[] = visibleGraph.edges
       .filter((edge) => nodeMap.has(edge.source) && nodeMap.has(edge.target))
       .map((edge) => ({ ...edge }));
-    const isLargeGraph = nodes.length > 300 || links.length > 700;
-    const isHugeGraph = nodes.length > 900 || links.length > 2200;
     const radiusById = new Map(nodes.map((item) => [item.id, nodeRadius(item)]));
     const radiusOf = (item: GraphNode) => radiusById.get(item.id) ?? nodeRadius(item);
-    const labelNodeIds = new Set(
-      [...nodes]
-        .sort((left, right) => nodeWeight(right) - nodeWeight(left))
-        .slice(0, isHugeGraph ? 80 : isLargeGraph ? 140 : nodes.length)
-        .map((node) => node.id)
+    const activeIslandClusters = showIslands
+      ? visibleClusters.filter((cluster) => cluster.visibleNodeIds.some((nodeId) => nodeMap.has(nodeId)))
+      : [];
+    const islandCenterById = new Map<string, { x: number; y: number }>();
+    const islandRadiusX = Math.max(120, Math.min(width * 0.32, width / 2 - 96));
+    const islandRadiusY = Math.max(110, Math.min(height * 0.28, height / 2 - 86));
+    activeIslandClusters.forEach((cluster, index) => {
+      if (activeIslandClusters.length === 1) {
+        islandCenterById.set(cluster.id, { x: width / 2, y: height / 2 });
+        return;
+      }
+
+      const angle = -Math.PI / 2 + (index * Math.PI * 2) / activeIslandClusters.length;
+      islandCenterById.set(cluster.id, {
+        x: width / 2 + Math.cos(angle) * islandRadiusX,
+        y: height / 2 + Math.sin(angle) * islandRadiusY
+      });
+    });
+    const islandCenterFor = (item: SimNode) => (item.clusterId ? islandCenterById.get(item.clusterId) : undefined);
+    const islandNodesById = new Map(
+      activeIslandClusters.map((cluster) => [
+        cluster.id,
+        cluster.visibleNodeIds
+          .map((nodeId) => nodeMap.get(nodeId))
+          .filter((item): item is SimNode => Boolean(item))
+      ])
     );
+    const clusterNodesFor = (cluster: VisibleCluster) => islandNodesById.get(cluster.id) ?? [];
 
     const root = d3.select(svg);
     root.selectAll("*").remove();
     root
       .attr("viewBox", `0 0 ${width} ${height}`)
-      .classed("intersection-highlight-mode", hasIntersectionHighlight);
+      .classed("intersection-highlight-mode", hasIntersectionHighlight)
+      .classed("island-mode", showIslands);
 
     const defs = root.append("defs");
     const zoomLayer = root.append("g");
+    const islandLayer = zoomLayer.append("g").attr("class", "cluster-islands");
     const linkLayer = zoomLayer.append("g").attr("class", "links");
     const nodeLayer = zoomLayer.append("g").attr("class", "nodes");
 
@@ -335,7 +370,27 @@ export function GraphCanvas({
     root.on("click", () => {
       setFocusedNodeId(null);
       setHovered(null);
+      onHoverCluster?.(null);
+      onSelectCluster?.(null);
     });
+
+    const islandHull = islandLayer
+      .selectAll<SVGPathElement, VisibleCluster>("path")
+      .data(activeIslandClusters, (cluster) => cluster.id)
+      .enter()
+      .append("path")
+      .attr("class", "cluster-island-hull")
+      .attr("fill", (cluster) => cluster.color)
+      .attr("stroke", (cluster) => cluster.color)
+      .on("mouseenter", (event, cluster) => {
+        event.stopPropagation();
+        onHoverCluster?.(cluster.id);
+      })
+      .on("mouseleave", () => onHoverCluster?.(null))
+      .on("click", (event, cluster) => {
+        event.stopPropagation();
+        onSelectCluster?.(activeClusterIdRef.current === cluster.id ? null : cluster.id);
+      });
 
     const link = linkLayer
       .selectAll("line")
@@ -375,6 +430,22 @@ export function GraphCanvas({
       .classed("is-intersection", (item) => intersectionNodeIds.has(item.id))
       .classed("is-intersection-dimmed", (item) => hasIntersectionHighlight && !intersectionNodeIds.has(item.id))
       .classed("has-unheard-known-collab", (item) => unheardKnownCollabNodeIds.has(item.id));
+
+    if (showIslands) {
+      link.style("--cluster-color", (edge) => {
+        const sourceNode = nodeMap.get(endpointId(edge.source));
+        const targetNode = nodeMap.get(endpointId(edge.target));
+        if (sourceNode?.clusterId && sourceNode.clusterId === targetNode?.clusterId) {
+          return clusterById.get(sourceNode.clusterId)?.color ?? "var(--green)";
+        }
+        return "var(--green)";
+      });
+      node
+        .style("--cluster-color", (item) =>
+          item.clusterId ? clusterById.get(item.clusterId)?.color ?? "var(--green)" : "var(--green)"
+        )
+        .classed("island-member", (item) => Boolean(item.clusterId && clusterById.has(item.clusterId)));
+    }
 
     function applyContext() {
       if (contextTiers.size === 0) {
@@ -434,21 +505,57 @@ export function GraphCanvas({
         .classed("is-dimmed", (item) => !connectedIds.has(item.id));
     }
 
+    function applyIslandState() {
+      const activeId = activeClusterIdRef.current;
+      const hoverId = hoveredClusterIdRef.current;
+      const highlightedId = showIslands ? activeId ?? hoverId : null;
+      const activeNodeIds = new Set(highlightedId ? clusterById.get(highlightedId)?.visibleNodeIds ?? [] : []);
+
+      islandHull
+        .classed("is-active", (cluster) => cluster.id === activeId)
+        .classed("is-hovered", (cluster) => cluster.id === hoverId)
+        .classed("is-dimmed", (cluster) => Boolean(highlightedId && cluster.id !== highlightedId));
+
+      node
+        .classed("island-active-node", (item) => Boolean(highlightedId && activeNodeIds.has(item.id)))
+        .classed("island-dimmed", (item) => Boolean(highlightedId && !activeNodeIds.has(item.id)));
+
+      link
+        .classed("island-active-link", (edge) => {
+          if (!highlightedId) return false;
+          return activeNodeIds.has(endpointId(edge.source)) && activeNodeIds.has(endpointId(edge.target));
+        })
+        .classed("island-dimmed", (edge) => {
+          if (!highlightedId) return false;
+          return !activeNodeIds.has(endpointId(edge.source)) || !activeNodeIds.has(endpointId(edge.target));
+        });
+    }
+
     node.on("mouseenter", (_, item) => {
       setHovered(item);
       focusNode(item);
+      if (showIslands && item.clusterId) {
+        onHoverCluster?.(item.clusterId);
+      }
     });
     node.on("mouseleave", () => {
       setHovered(null);
       focusNode(null);
+      if (showIslands) {
+        onHoverCluster?.(null);
+      }
     });
     node.on("click", (event, item) => {
       event.stopPropagation();
       setFocusedNodeId((current) => (current === item.id ? null : item.id));
       setHovered(item);
+      if (showIslands && item.clusterId) {
+        onSelectCluster?.(activeClusterIdRef.current === item.clusterId ? null : item.clusterId);
+      }
     });
 
     applyContext();
+    applyIslandState();
 
     const avatarNodes = nodes.filter((item) => Boolean(item.image));
     const clips = defs
@@ -531,7 +638,6 @@ export function GraphCanvas({
       .attr("text-anchor", "middle");
 
     node
-      .filter((item) => !isLargeGraph || labelNodeIds.has(item.id) || contextTiers.has(item.id))
       .append("text")
       .text((item) => item.name)
       .attr("dy", (item) => radiusOf(item) + 18)
@@ -544,29 +650,40 @@ export function GraphCanvas({
         d3
           .forceLink<SimNode, SimEdge>(links)
           .id((item) => item.id)
-          .distance(edgeDistance)
+          .distance((edge) => (showIslands && edge.type === "collab" ? Math.max(92, edgeDistance(edge) - 30) : edgeDistance(edge)))
           .strength(edgeStrength)
       )
-      .force("charge", d3.forceManyBody().strength(-repulsionStrength).theta(isLargeGraph ? 1.15 : 0.9))
+      .force("charge", d3.forceManyBody().strength(-repulsionStrength))
       .force("center", d3.forceCenter(width / 2, height / 2))
-      .force("x", d3.forceX<SimNode>(width / 2).strength(isLargeGraph ? 0.012 : 0.018))
-      .force("y", d3.forceY<SimNode>(height / 2).strength(isLargeGraph ? 0.012 : 0.018))
       .force(
         "collision",
-        d3
-          .forceCollide<SimNode>()
-          .radius((item) => radiusOf(item) + (isHugeGraph ? 20 : 34))
-          .strength(isLargeGraph ? 0.76 : 0.92)
-          .iterations(isLargeGraph ? 1 : 2)
-      )
-      .alpha(isLargeGraph ? 0.72 : 1)
-      .alphaDecay(isLargeGraph ? 0.048 : 0.028)
-      .velocityDecay(isLargeGraph ? 0.58 : 0.46);
+        d3.forceCollide<SimNode>().radius((item) => radiusOf(item) + 34)
+      );
+
+    if (showIslands) {
+      simulation
+        .force(
+          "x",
+          d3
+            .forceX<SimNode>((item) => islandCenterFor(item)?.x ?? width / 2)
+            .strength((item) => (islandCenterFor(item) ? 0.045 : 0.012))
+        )
+        .force(
+          "y",
+          d3
+            .forceY<SimNode>((item) => islandCenterFor(item)?.y ?? height / 2)
+            .strength((item) => (islandCenterFor(item) ? 0.045 : 0.012))
+        );
+    }
+
+    let islandSimulationSettled = false;
+    const islandHullTickInterval = nodes.length > 500 ? 12 : nodes.length > 250 ? 6 : 3;
 
     node.call(
       d3
         .drag<SVGGElement, SimNode>()
         .on("start", (event, item) => {
+          islandSimulationSettled = false;
           if (!event.active) simulation.alphaTarget(0.12).restart();
           item.fx = item.x;
           item.fy = item.y;
@@ -598,24 +715,37 @@ export function GraphCanvas({
         .attr("y2", (edge) => (edge.target as SimNode).y ?? 0);
     };
 
+    const renderIslandHulls = () => {
+      islandHull.each(function renderIslandHull(cluster) {
+        const clusterNodes = clusterNodesFor(cluster);
+        d3.select(this)
+          .attr("d", clusterHullPath(clusterNodes, radiusOf) ?? "")
+          .attr("display", clusterNodes.length > 1 ? null : "none");
+      });
+    };
+
     const renderTick = () => {
       tickCount += 1;
       const shouldRenderLinks = linksVisible || tickCount % 8 === 0 || simulation.alpha() < 0.22;
       if (shouldRenderLinks) {
         renderLinks();
       }
+      if (
+        showIslands &&
+        (tickCount === 1 || tickCount % islandHullTickInterval === 0 || simulation.alpha() < 0.08)
+      ) {
+        renderIslandHulls();
+      }
       if (deferLinks && !linksVisible && simulation.alpha() < 0.22) {
         linksVisible = true;
         linkLayer.transition().duration(180).attr("opacity", "1");
       }
       node.attr("transform", (item) => `translate(${item.x ?? 0},${item.y ?? 0})`);
-      for (const item of nodes) {
-        positionCache.set(item.id, {
-          x: item.x,
-          y: item.y,
-          vx: item.vx,
-          vy: item.vy
-        });
+      if (showIslands && !islandSimulationSettled && simulation.alpha() < 0.035) {
+        islandSimulationSettled = true;
+        renderLinks();
+        renderIslandHulls();
+        simulation.stop();
       }
       frameId = null;
     };
@@ -624,23 +754,12 @@ export function GraphCanvas({
       frameId = window.requestAnimationFrame(renderTick);
     };
 
-    if (isLargeGraph) {
-      simulation.tick(isHugeGraph ? 10 : 16);
-    }
     scheduleRender();
     simulation.on("tick", scheduleRender);
 
     return () => {
       if (frameId !== null) {
         window.cancelAnimationFrame(frameId);
-      }
-      for (const item of nodes) {
-        positionCache.set(item.id, {
-          x: item.x,
-          y: item.y,
-          vx: item.vx,
-          vy: item.vy
-        });
       }
       simulation.stop();
     };
@@ -649,10 +768,53 @@ export function GraphCanvas({
     hasIntersectionHighlight,
     intersectionNodeIds,
     listenedPairKeys,
+    clusterById,
+    onHoverCluster,
+    onSelectCluster,
     overlayMatches,
     repulsionStrength,
+    showIslands,
     unheardKnownCollabNodeIds,
+    visibleClusters,
     visibleGraph
+  ]);
+
+  useEffect(() => {
+    const svg = svgRef.current;
+    if (!svg) return;
+    if (!showIslands) return;
+
+    const highlightedId = showIslands ? highlightedCluster?.id ?? null : null;
+    const activeNodeIds = showIslands ? highlightedClusterNodeIds : new Set<string>();
+
+    d3.select(svg)
+      .selectAll<SVGPathElement, VisibleCluster>(".cluster-island-hull")
+      .classed("is-active", (cluster) => cluster.id === activeClusterId)
+      .classed("is-hovered", (cluster) => cluster.id === hoveredClusterId)
+      .classed("is-dimmed", (cluster) => Boolean(highlightedId && cluster.id !== highlightedId));
+
+    d3.select(svg)
+      .selectAll<SVGGElement, SimNode>(".graph-node")
+      .classed("island-active-node", (item) => Boolean(highlightedId && activeNodeIds.has(item.id)))
+      .classed("island-dimmed", (item) => Boolean(highlightedId && !activeNodeIds.has(item.id)));
+
+    d3.select(svg)
+      .selectAll<SVGLineElement, SimEdge>(".graph-edge")
+      .classed("island-active-link", (edge) => {
+        if (!highlightedId) return false;
+        return activeNodeIds.has(endpointId(edge.source)) && activeNodeIds.has(endpointId(edge.target));
+      })
+      .classed("island-dimmed", (edge) => {
+        if (!highlightedId) return false;
+        return !activeNodeIds.has(endpointId(edge.source)) || !activeNodeIds.has(endpointId(edge.target));
+      });
+  }, [
+    activeClusterId,
+    highlightedCluster?.id,
+    highlightedClusterNodeIds,
+    hoveredClusterId,
+    showIslands,
+    visibleClusters
   ]);
 
   if (!graph) {

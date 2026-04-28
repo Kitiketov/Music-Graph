@@ -8,7 +8,7 @@ from sqlalchemy import and_, case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Artist, ArtistEdge, Friendship, Track, TrackArtist, UserArtistStat, UserListen
-from app.schemas.graph import CompareResponse, GraphEdge, GraphNode, GraphResponse
+from app.schemas.graph import CompareResponse, GraphCluster, GraphEdge, GraphNode, GraphResponse
 from app.services.sync_service import get_latest_source_status
 
 
@@ -16,6 +16,9 @@ def mark_shared_nodes(nodes: list[GraphNode], shared_ids: set[str]) -> list[Grap
     for node in nodes:
         node.isShared = node.id in shared_ids
     return nodes
+
+
+CLUSTER_COLORS = ["#1f8a70", "#cf4b3f", "#2f6fbd", "#d79b28", "#7b61ff", "#e26d3d", "#139f8f", "#8c5a3c"]
 
 
 def edge_key(left: str, right: str, edge_type: str) -> tuple[str, str, str]:
@@ -94,6 +97,103 @@ def _should_include_neighbor(edge_type: str, _edge: ArtistEdge, stats: dict[str,
     if edge_type == "catalog_collab":
         return _has_user_track_evidence(stats, artist_id)
     return _has_known_tracks(stats, artist_id)
+
+
+def _node_cluster_score(node: GraphNode) -> tuple[int, int, int, str]:
+    return (
+        node.knownTrackCount or node.trackCount or node.listenCount,
+        node.listenCount,
+        node.trackCount,
+        node.name.casefold(),
+    )
+
+
+def _build_graph_clusters(nodes: list[GraphNode], edges: list[GraphEdge]) -> list[GraphCluster]:
+    node_by_id = {node.id: node for node in nodes}
+    adjacency: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+
+    for edge in edges:
+        if edge.type != "collab" or edge.source not in node_by_id or edge.target not in node_by_id:
+            continue
+        weight = max(int(edge.weight), 1)
+        adjacency[edge.source][edge.target] += weight
+        adjacency[edge.target][edge.source] += weight
+
+    connected_ids = {node_id for node_id, neighbors in adjacency.items() if neighbors}
+    if not connected_ids:
+        for node in nodes:
+            node.clusterId = None
+        return []
+
+    labels = {node_id: node_id for node_id in connected_ids}
+    seed_rank = {
+        node_id: index
+        for index, node_id in enumerate(
+            sorted(connected_ids, key=lambda item: (_node_cluster_score(node_by_id[item]), item), reverse=True)
+        )
+    }
+    ordered_ids = sorted(connected_ids, key=lambda item: (_node_cluster_score(node_by_id[item]), item), reverse=True)
+
+    for _ in range(12):
+        changed = False
+        for node_id in ordered_ids:
+            scores: dict[str, int] = defaultdict(int)
+            for neighbor_id, weight in adjacency[node_id].items():
+                scores[labels[neighbor_id]] += weight
+            if not scores:
+                continue
+            best_label = max(scores, key=lambda label: (scores[label], -seed_rank.get(label, 0), label))
+            if best_label != labels[node_id]:
+                labels[node_id] = best_label
+                changed = True
+        if not changed:
+            break
+
+    groups: dict[str, list[str]] = defaultdict(list)
+    for node_id, label in labels.items():
+        groups[label].append(node_id)
+
+    clusters: list[GraphCluster] = []
+    cluster_groups = [sorted(group) for group in groups.values() if len(group) > 1]
+    cluster_groups.sort(
+        key=lambda group: (
+            sum(node_by_id[node_id].listenCount for node_id in group),
+            len(group),
+            max(_node_cluster_score(node_by_id[node_id]) for node_id in group),
+        ),
+        reverse=True,
+    )
+
+    clustered_ids: set[str] = set()
+    for index, node_ids in enumerate(cluster_groups, start=1):
+        cluster_id = f"island-{index}"
+        ranked_nodes = sorted(
+            (node_by_id[node_id] for node_id in node_ids),
+            key=lambda node: (_node_cluster_score(node), node.id),
+            reverse=True,
+        )
+        top_artists = [node.name for node in ranked_nodes[:3]]
+        for node_id in node_ids:
+            node_by_id[node_id].clusterId = cluster_id
+            clustered_ids.add(node_id)
+        clusters.append(
+            GraphCluster(
+                id=cluster_id,
+                label=" / ".join(top_artists),
+                color=CLUSTER_COLORS[(index - 1) % len(CLUSTER_COLORS)],
+                nodeIds=node_ids,
+                size=len(node_ids),
+                totalListenCount=sum(node_by_id[node_id].listenCount for node_id in node_ids),
+                totalTrackCount=sum(node_by_id[node_id].trackCount for node_id in node_ids),
+                topArtists=top_artists,
+            )
+        )
+
+    for node in nodes:
+        if node.id not in clustered_ids:
+            node.clusterId = None
+
+    return clusters
 
 
 async def _add_neighbor_nodes(
@@ -427,9 +527,13 @@ async def build_user_graph(
         shared_ids = await artist_ids_for_user(db, owner_id) & await artist_ids_for_user(db, shared_with_user_id)
         mark_shared_nodes(nodes, shared_ids)
 
+    sorted_edges = sorted(edges.values(), key=lambda item: (item.type, -item.weight))
+    clusters = _build_graph_clusters(nodes, sorted_edges) if "collab" in edge_types else []
+
     return GraphResponse(
         nodes=nodes,
-        edges=sorted(edges.values(), key=lambda item: (item.type, -item.weight)),
+        edges=sorted_edges,
+        clusters=clusters,
         sourceStatus=await get_latest_source_status(db, owner_id),
     )
 

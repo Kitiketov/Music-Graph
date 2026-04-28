@@ -1,7 +1,13 @@
 from types import SimpleNamespace
 
-from app.schemas.graph import GraphNode
-from app.services.graph_service import _should_include_neighbor, _unheard_catalog_tracks, edge_key, mark_shared_nodes
+from app.schemas.graph import GraphEdge, GraphNode
+from app.services.graph_service import (
+    _build_graph_clusters,
+    _should_include_neighbor,
+    _unheard_catalog_tracks,
+    edge_key,
+    mark_shared_nodes,
+)
 
 
 def test_edge_key_normalizes_artist_order() -> None:
@@ -66,3 +72,52 @@ def test_similar_with_known_stats_is_visible() -> None:
     stats = {"5465911": {"knownTrackCount": 1}}
 
     assert _should_include_neighbor("similar", edge, stats, "5465911") is True
+
+
+def test_graph_clusters_group_listened_collabs() -> None:
+    nodes = [
+        GraphNode(id="a", name="ATL", listenCount=8, trackCount=5),
+        GraphNode(id="b", name="Horus", listenCount=4, trackCount=3),
+        GraphNode(id="c", name="Lupercal", listenCount=2, trackCount=1),
+    ]
+    edges = [
+        GraphEdge(source="a", target="b", type="collab", weight=3, tracks=["Track"]),
+        GraphEdge(source="b", target="c", type="collab", weight=1, tracks=["Track 2"]),
+    ]
+
+    clusters = _build_graph_clusters(nodes, edges)
+
+    assert len(clusters) == 1
+    assert clusters[0].nodeIds == ["a", "b", "c"]
+    assert clusters[0].label == "ATL / Horus / Lupercal"
+    assert {node.clusterId for node in nodes} == {clusters[0].id}
+
+
+def test_graph_clusters_ignore_similar_and_catalog_edges() -> None:
+    nodes = [
+        GraphNode(id="a", name="Artist A", listenCount=8, trackCount=5),
+        GraphNode(id="b", name="Artist B", listenCount=4, trackCount=3),
+        GraphNode(id="c", name="Artist C", listenCount=2, trackCount=1),
+    ]
+    edges = [
+        GraphEdge(source="a", target="b", type="similar", weight=10, tracks=[]),
+        GraphEdge(source="b", target="c", type="catalog_collab", weight=10, tracks=["Unheard"]),
+    ]
+
+    clusters = _build_graph_clusters(nodes, edges)
+
+    assert clusters == []
+    assert all(node.clusterId is None for node in nodes)
+
+
+def test_graph_clusters_do_not_create_single_artist_islands() -> None:
+    nodes = [
+        GraphNode(id="a", name="Artist A", listenCount=8, trackCount=5),
+        GraphNode(id="b", name="Artist B", listenCount=4, trackCount=3),
+    ]
+    edges = [GraphEdge(source="a", target="missing", type="collab", weight=3, tracks=["Track"])]
+
+    clusters = _build_graph_clusters(nodes, edges)
+
+    assert clusters == []
+    assert all(node.clusterId is None for node in nodes)

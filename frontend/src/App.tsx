@@ -20,6 +20,14 @@ type FriendGraphOverlay = {
   graph: GraphResponse;
 };
 
+type ClusterIslandsPanelProps = {
+  graph: GraphResponse | null;
+  enabled: boolean;
+  activeClusterId: string | null;
+  onHoverCluster: (clusterId: string | null) => void;
+  onSelectCluster: (clusterId: string | null) => void;
+};
+
 function overlayColorFor(userId: string): string {
   const hash = [...userId].reduce((sum, char) => sum + char.charCodeAt(0), 0);
   return overlayPalette[hash % overlayPalette.length];
@@ -137,6 +145,60 @@ function graphNodeScoreLabel(node: GraphResponse["nodes"][number]) {
     parts.push(`${node.trackCount} в графе`);
   }
   return parts.join(", ");
+}
+
+function ClusterIslandsPanel({
+  graph,
+  enabled,
+  activeClusterId,
+  onHoverCluster,
+  onSelectCluster
+}: ClusterIslandsPanelProps) {
+  const clusters = useMemo(() => {
+    return [...(graph?.clusters ?? [])]
+      .sort(
+        (left, right) =>
+          right.totalListenCount - left.totalListenCount ||
+          right.size - left.size ||
+          left.label.localeCompare(right.label, "ru")
+      )
+      .slice(0, 10);
+  }, [graph]);
+
+  if (clusters.length === 0) return null;
+
+  return (
+    <section className={`cluster-islands-panel ${enabled ? "" : "is-disabled"}`}>
+      <div className="stats-heading">
+        <div>
+          <p className="eyebrow">Музыкальные острова(beta)</p>
+          <h2>Группы по прослушанным коллабам</h2>
+        </div>
+        <span className="cluster-islands-note">
+          {enabled ? "Наведи на остров, чтобы подсветить артистов" : "Включи чекбокс «Острова» и «Мои коллабы»"}
+        </span>
+      </div>
+      <div className="cluster-islands-list">
+        {clusters.map((cluster) => (
+          <button
+            className={`cluster-island-card ${activeClusterId === cluster.id ? "active" : ""}`}
+            disabled={!enabled}
+            key={cluster.id}
+            onClick={() => onSelectCluster(activeClusterId === cluster.id ? null : cluster.id)}
+            onMouseEnter={() => onHoverCluster(cluster.id)}
+            onMouseLeave={() => onHoverCluster(null)}
+            style={{ "--cluster-color": cluster.color } as CSSProperties}
+            type="button"
+          >
+            <i />
+            <strong>{cluster.label}</strong>
+            <span>{cluster.size} артистов, {cluster.totalListenCount} прослушиваний</span>
+            <em>{cluster.topArtists.join(", ")}</em>
+          </button>
+        ))}
+      </div>
+    </section>
+  );
 }
 
 function GraphStatsPanel({ graph }: { graph: GraphResponse | null }) {
@@ -337,12 +399,18 @@ export function App() {
   const [loadingOverlayIds, setLoadingOverlayIds] = useState<Set<string>>(new Set());
   const [limit, setLimit] = useState(100);
   const [minListens, setMinListens] = useState(1);
+  const [draftLimit, setDraftLimit] = useState(100);
+  const [draftMinListens, setDraftMinListens] = useState(1);
   const [search, setSearch] = useState("");
   const [graphDepth, setGraphDepth] = useState(1);
+  const [draftGraphDepth, setDraftGraphDepth] = useState(1);
   const [repulsionStrength, setRepulsionStrength] = useState(760);
   const [showCollabs, setShowCollabs] = useState(true);
   const [showCatalogCollabs, setShowCatalogCollabs] = useState(false);
   const [showSimilar, setShowSimilar] = useState(false);
+  const [showIslands, setShowIslands] = useState(false);
+  const [hoveredClusterId, setHoveredClusterId] = useState<string | null>(null);
+  const [activeClusterId, setActiveClusterId] = useState<string | null>(null);
   const [highlightIntersections, setHighlightIntersections] = useState(false);
   const [loadingGraph, setLoadingGraph] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -381,6 +449,30 @@ export function App() {
     }).toString();
   }, [graphDepth, limit, minListens]);
 
+  const commitLimit = useCallback((nextValue: number) => {
+    const normalized = Math.max(25, Math.min(5000, Math.round(nextValue / 50) * 50));
+    setDraftLimit(normalized);
+    setLimit(normalized);
+  }, []);
+
+  const commitMinListens = useCallback((nextValue: number) => {
+    const normalized = Math.max(1, Number.isFinite(nextValue) ? Math.floor(nextValue) : 1);
+    setDraftMinListens(normalized);
+    setMinListens(normalized);
+  }, []);
+
+  const commitGraphDepth = useCallback((nextValue: number) => {
+    const normalized = Math.max(1, Math.min(3, Math.round(nextValue)));
+    setDraftGraphDepth(normalized);
+    setGraphDepth(normalized);
+  }, []);
+
+  const commitGraphControls = useCallback(() => {
+    commitLimit(draftLimit);
+    commitMinListens(draftMinListens);
+    commitGraphDepth(draftGraphDepth);
+  }, [commitGraphDepth, commitLimit, commitMinListens, draftGraphDepth, draftLimit, draftMinListens]);
+
   const loadGraph = useCallback(async () => {
     if (!user) return;
     const requestSeq = graphRequestSeqRef.current + 1;
@@ -401,6 +493,27 @@ export function App() {
     }
   }, [graphParamsString, user]);
 
+  const handleRefreshGraph = useCallback(() => {
+    const controlsChanged =
+      draftLimit !== limit ||
+      draftMinListens !== minListens ||
+      draftGraphDepth !== graphDepth;
+
+    commitGraphControls();
+    if (!controlsChanged) {
+      void loadGraph();
+    }
+  }, [
+    commitGraphControls,
+    draftGraphDepth,
+    draftLimit,
+    draftMinListens,
+    graphDepth,
+    limit,
+    loadGraph,
+    minListens
+  ]);
+
   useEffect(() => {
     if (!user) return;
 
@@ -410,6 +523,16 @@ export function App() {
 
     return () => window.clearTimeout(timer);
   }, [loadGraph, user]);
+
+  const islandsAvailable = showCollabs && (graph?.clusters?.length ?? 0) > 0;
+  const islandsEnabled = showIslands && islandsAvailable;
+
+  useEffect(() => {
+    if (islandsAvailable) return;
+    setShowIslands(false);
+    setHoveredClusterId(null);
+    setActiveClusterId(null);
+  }, [islandsAvailable]);
 
   const setOverlayLoading = useCallback((friendId: string, isLoading: boolean) => {
     setLoadingOverlayIds((current) => {
@@ -678,14 +801,18 @@ export function App() {
             </div>
             <label className="slider-control" title="Сколько основных артистов брать в граф по твоей статистике">
               <SlidersHorizontal size={17} />
-              <span>Top {limit}</span>
+              <span>Top {draftLimit}</span>
               <input
                 type="range"
                 min="25"
                 max="5000"
                 step="50"
-                value={limit}
-                onChange={(event) => setLimit(Number(event.target.value))}
+                value={draftLimit}
+                onBlur={(event) => commitLimit(Number(event.currentTarget.value))}
+                onChange={(event) => setDraftLimit(Number(event.target.value))}
+                onKeyUp={(event) => commitLimit(Number(event.currentTarget.value))}
+                onPointerCancel={(event) => commitLimit(Number(event.currentTarget.value))}
+                onPointerUp={(event) => commitLimit(Number(event.currentTarget.value))}
               />
             </label>
             <label className="number-control" title="Минимум синхронизированных прослушиваний, чтобы артист попал в основу графа">
@@ -693,20 +820,30 @@ export function App() {
               <input
                 type="number"
                 min="1"
-                value={minListens}
-                onChange={(event) => setMinListens(Math.max(1, Number(event.target.value)))}
+                value={draftMinListens}
+                onBlur={(event) => commitMinListens(Number(event.currentTarget.value))}
+                onChange={(event) => setDraftMinListens(Math.max(1, Number(event.target.value)))}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    commitMinListens(Number(event.currentTarget.value));
+                  }
+                }}
               />
             </label>
             <label className="slider-control" title="Сколько слоёв связей показывать: 1 — от твоих артистов, 2 — от найденных артистов дальше, 3 — ещё глубже">
               <SlidersHorizontal size={17} />
-              <span>Глубина {graphDepth}</span>
+              <span>Глубина {draftGraphDepth}</span>
               <input
                 type="range"
                 min="1"
                 max="3"
                 step="1"
-                value={graphDepth}
-                onChange={(event) => setGraphDepth(Number(event.target.value))}
+                value={draftGraphDepth}
+                onBlur={(event) => commitGraphDepth(Number(event.currentTarget.value))}
+                onChange={(event) => setDraftGraphDepth(Number(event.target.value))}
+                onKeyUp={(event) => commitGraphDepth(Number(event.currentTarget.value))}
+                onPointerCancel={(event) => commitGraphDepth(Number(event.currentTarget.value))}
+                onPointerUp={(event) => commitGraphDepth(Number(event.currentTarget.value))}
               />
             </label>
             <label className="slider-control force-control" title="Сила отталкивания пузырей: больше значение — артисты сильнее разъезжаются, меньше — граф плотнее">
@@ -747,6 +884,22 @@ export function App() {
               Похожие
             </label>
             <label
+              className="toggle-chip islands-toggle"
+              title={
+                islandsAvailable
+                  ? "Подсветить музыкальные острова: группы артистов, связанных твоими прослушанными коллабами"
+                  : "Острова появятся, когда в графе есть прослушанные коллабы"
+              }
+            >
+              <input
+                type="checkbox"
+                checked={islandsEnabled}
+                disabled={!islandsAvailable}
+                onChange={(event) => setShowIslands(event.target.checked)}
+              />
+              Острова(beta)
+            </label>
+            <label
               className="toggle-chip intersection-toggle"
               title={
                 friendOverlays.length === 0
@@ -765,7 +918,7 @@ export function App() {
             <button
               className="icon-button wide"
               disabled={loadingGraph}
-              onClick={() => void loadGraph()}
+              onClick={handleRefreshGraph}
               title="Перезагрузить граф с текущими фильтрами"
             >
               Обновить граф
@@ -805,6 +958,18 @@ export function App() {
             showSimilarEdges={showSimilar}
             overlayMatches={overlayMatches}
             highlightIntersections={highlightIntersections}
+            showIslands={islandsEnabled}
+            hoveredClusterId={hoveredClusterId}
+            activeClusterId={activeClusterId}
+            onHoverCluster={setHoveredClusterId}
+            onSelectCluster={setActiveClusterId}
+          />
+          <ClusterIslandsPanel
+            activeClusterId={activeClusterId}
+            enabled={islandsEnabled}
+            graph={graph}
+            onHoverCluster={setHoveredClusterId}
+            onSelectCluster={setActiveClusterId}
           />
           <SharedArtistsPanel graph={graph} overlayMatches={overlayMatches} />
           <GraphStatsPanel graph={graph} />

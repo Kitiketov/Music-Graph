@@ -50,6 +50,18 @@ export type GraphNode = {
   isSimilarOnly: boolean;
   isCatalogOnly: boolean;
   isLikedArtist: boolean;
+  clusterId?: string | null;
+};
+
+export type GraphCluster = {
+  id: string;
+  label: string;
+  color: string;
+  nodeIds: string[];
+  size: number;
+  totalListenCount: number;
+  totalTrackCount: number;
+  topArtists: string[];
 };
 
 export type GraphOverlayMatch = {
@@ -72,6 +84,7 @@ export type GraphEdge = {
 export type GraphResponse = {
   nodes: GraphNode[];
   edges: GraphEdge[];
+  clusters: GraphCluster[];
   sourceStatus: Record<string, string>;
 };
 

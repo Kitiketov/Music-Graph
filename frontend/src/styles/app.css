@@ -1049,6 +1049,12 @@ h2 {
   background: rgba(207, 75, 63, 0.09);
 }
 
+.islands-toggle:has(input:checked) {
+  border-color: rgba(31, 138, 112, 0.44);
+  color: var(--green-deep);
+  background: rgba(31, 138, 112, 0.11);
+}
+
 .toggle-chip:has(input:disabled) {
   cursor: not-allowed;
   opacity: 0.48;
@@ -1403,6 +1409,46 @@ h2 {
   opacity: 0.9;
 }
 
+.cluster-islands {
+  pointer-events: none;
+}
+
+.cluster-island-hull {
+  opacity: 0.16;
+  stroke-width: 2.5px;
+  stroke-linejoin: round;
+  stroke-opacity: 0.52;
+  pointer-events: none;
+  transition:
+    opacity 160ms ease,
+    stroke-width 160ms ease;
+}
+
+.cluster-island-hull.is-hovered,
+.cluster-island-hull.is-active {
+  opacity: 0.28;
+  stroke-width: 5px;
+  stroke-opacity: 0.86;
+}
+
+.cluster-island-hull.is-active {
+  opacity: 0.34;
+}
+
+.cluster-island-hull.is-dimmed {
+  opacity: 0.055;
+  stroke-opacity: 0.2;
+}
+
+.graph-edge.island-active-link {
+  stroke: var(--cluster-color);
+  opacity: 0.92;
+}
+
+.graph-edge.island-dimmed {
+  opacity: 0.055;
+}
+
 .intersection-highlight-mode .graph-edge {
   opacity: 0.16;
 }
@@ -1435,6 +1481,21 @@ h2 {
 
 .graph-node.is-intersection-dimmed {
   opacity: 0.12;
+}
+
+.island-mode .graph-node.island-member .node-ring {
+  stroke: var(--cluster-color);
+  stroke-width: 4.5px;
+}
+
+.graph-node.island-active-node .node-ring {
+  stroke: var(--cluster-color);
+  stroke-width: 6px;
+  filter: drop-shadow(0 0 10px color-mix(in srgb, var(--cluster-color), transparent 58%));
+}
+
+.graph-node.island-dimmed {
+  opacity: 0.14;
 }
 
 .graph-node image {
@@ -1633,6 +1694,106 @@ h2 {
 
 .unheard-pill {
   background: var(--ink);
+}
+
+.cluster-islands-panel {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background:
+    radial-gradient(circle at 10% 0, rgba(31, 138, 112, 0.13), transparent 30%),
+    radial-gradient(circle at 92% 12%, rgba(215, 155, 40, 0.14), transparent 28%),
+    rgba(255, 253, 247, 0.9);
+  box-shadow: 0 12px 40px rgba(40, 47, 52, 0.08);
+}
+
+.cluster-islands-panel.is-disabled {
+  opacity: 0.78;
+}
+
+.cluster-islands-note {
+  max-width: 34ch;
+  color: var(--muted);
+  font-size: 0.86rem;
+  line-height: 1.35;
+  text-align: right;
+}
+
+.cluster-islands-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.cluster-island-card {
+  --cluster-color: var(--green);
+  min-width: 0;
+  min-height: 88px;
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-content: start;
+  gap: 4px 10px;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--cluster-color), white 58%);
+  border-radius: 10px;
+  color: var(--ink);
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--cluster-color), white 88%), rgba(255, 253, 247, 0.82)),
+    rgba(255, 253, 247, 0.86);
+  text-align: left;
+  transition:
+    transform 150ms ease,
+    border-color 150ms ease,
+    box-shadow 150ms ease;
+}
+
+.cluster-island-card:hover,
+.cluster-island-card.active {
+  transform: translateY(-2px);
+  border-color: color-mix(in srgb, var(--cluster-color), var(--ink) 16%);
+  box-shadow: 0 14px 32px color-mix(in srgb, var(--cluster-color), transparent 78%);
+}
+
+.cluster-island-card:disabled {
+  cursor: not-allowed;
+  filter: grayscale(0.2);
+  opacity: 0.64;
+  transform: none;
+  box-shadow: none;
+}
+
+.cluster-island-card i {
+  grid-row: 1 / span 3;
+  width: 12px;
+  height: 12px;
+  margin-top: 4px;
+  border-radius: 999px;
+  background: var(--cluster-color);
+  box-shadow: 0 0 0 5px color-mix(in srgb, var(--cluster-color), transparent 78%);
+}
+
+.cluster-island-card strong,
+.cluster-island-card span,
+.cluster-island-card em {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cluster-island-card strong {
+  white-space: nowrap;
+}
+
+.cluster-island-card span,
+.cluster-island-card em {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.cluster-island-card em {
+  font-style: normal;
 }
 
 .graph-stats-panel {
@@ -2018,6 +2179,10 @@ h2 {
     align-items: flex-start;
     border-radius: 12px;
     flex-direction: column;
+  }
+
+  .cluster-islands-note {
+    text-align: left;
   }
 
   .slider-control,

@@ -18,6 +18,7 @@ class GraphNode(BaseModel):
     isSimilarOnly: bool = False
     isCatalogOnly: bool = False
     isLikedArtist: bool = False
+    clusterId: str | None = None
 
 
 class GraphEdge(BaseModel):
@@ -28,9 +29,21 @@ class GraphEdge(BaseModel):
     tracks: list[str] = Field(default_factory=list)
 
 
+class GraphCluster(BaseModel):
+    id: str
+    label: str
+    color: str
+    nodeIds: list[str]
+    size: int
+    totalListenCount: int
+    totalTrackCount: int
+    topArtists: list[str]
+
+
 class GraphResponse(BaseModel):
     nodes: list[GraphNode]
     edges: list[GraphEdge]
+    clusters: list[GraphCluster] = Field(default_factory=list)
     sourceStatus: dict = Field(default_factory=dict)
 
 
