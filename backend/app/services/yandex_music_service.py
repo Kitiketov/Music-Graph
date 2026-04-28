@@ -14,6 +14,10 @@ from app.core.config import settings
 ProgressReporter = Callable[[str, int, str, dict[str, str]], None]
 
 
+class YandexMusicUnavailableError(RuntimeError):
+    """Raised when Yandex Music rejects API usage from the current server network."""
+
+
 @dataclass
 class ArtistSnapshot:
     id: str
@@ -395,6 +399,36 @@ def _elapsed_status(message: str, started_at: float) -> str:
     return _status_with_duration(message, time.perf_counter() - started_at)
 
 
+def _ensure_yandex_music_available(client: Any) -> str:
+    try:
+        status = client._request.get(f"{client.base_url}/account/status")
+    except Exception as exc:  # noqa: BLE001
+        message = str(exc)
+        if "451" in message or "Unavailable For Legal Reasons" in message:
+            raise YandexMusicUnavailableError(
+                "Яндекс Музыка недоступна с IP этого сервера: API вернул 451 Unavailable For Legal Reasons. "
+                "Нужно запускать sync на сервере или сети, где Яндекс Музыка доступна для этого аккаунта."
+            ) from exc
+        raise
+
+    raw = _raw_dict(status)
+    result = raw.get("result") if isinstance(raw.get("result"), dict) else raw
+    account = result.get("account", {}) if isinstance(result, dict) else {}
+    service_available = account.get("serviceAvailable")
+    if service_available is None:
+        service_available = account.get("service_available")
+    region = account.get("region", "unknown")
+    if service_available is False:
+        raise YandexMusicUnavailableError(
+            "Яндекс Музыка недоступна с IP этого сервера "
+            f"(region={region}, serviceAvailable=false). "
+            "Перенеси sync на сервер/сеть, где Яндекс Музыка доступна, иначе API будет отдавать 451."
+        )
+    if service_available is True:
+        return f"ok: serviceAvailable=true, region={region}"
+    return f"ok: account/status checked, region={region}"
+
+
 def _int_field(value: Any, name: str) -> int:
     raw_value = _field(value, name, 0)
     if isinstance(raw_value, bool):
@@ -647,6 +681,19 @@ def _fetch_snapshot_sync(token: str, progress_reporter: ProgressReporter | None 
         if progress_reporter is None:
             return
         progress_reporter(stage_key, progress, message, dict(source_status))
+
+    stage_started_at = time.perf_counter()
+    report("yandex_access", 13, "Проверяем доступность Яндекс Музыки с прод-сервера")
+    try:
+        source_status["yandex_access"] = _elapsed_status(
+            _ensure_yandex_music_available(client),
+            stage_started_at,
+        )
+    except YandexMusicUnavailableError as exc:
+        source_status["yandex_access"] = _elapsed_status(f"failed: {exc}", stage_started_at)
+        report("yandex_access", 100, str(exc))
+        raise
+    report("yandex_access", 14, "Яндекс Музыка доступна, начинаем sync")
 
     stage_started_at = time.perf_counter()
     report("liked_tracks", 15, "Смотрим лайкнутые треки")

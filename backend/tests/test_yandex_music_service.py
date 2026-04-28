@@ -1,10 +1,14 @@
 from types import SimpleNamespace
 
+import pytest
+
 from app.services.yandex_music_service import (
     ArtistSnapshot,
     TrackSnapshot,
+    YandexMusicUnavailableError,
     _artist_familiar_from_info,
     _catalog_collabs_from_tracks,
+    _ensure_yandex_music_available,
     _familiar_tracks_from_payload,
     _fetch_artist_familiar_with_tracks,
     _history_track_refs,
@@ -44,6 +48,29 @@ def test_tracks_from_likes_fetches_full_track_data() -> None:
     assert tracks[0].source == "liked_tracks"
     assert tracks[0].title == "Liked Song"
     assert tracks[0].artists[0].name == "Liked Artist"
+
+
+def test_yandex_availability_fails_when_service_unavailable() -> None:
+    class Request:
+        def get(self, url: str):
+            assert url == "https://api.music.yandex.ru/account/status"
+            return {"result": {"account": {"region": 10000, "serviceAvailable": False}}}
+
+    client = SimpleNamespace(base_url="https://api.music.yandex.ru", _request=Request())
+
+    with pytest.raises(YandexMusicUnavailableError, match="region=10000"):
+        _ensure_yandex_music_available(client)
+
+
+def test_yandex_availability_detects_legal_451() -> None:
+    class Request:
+        def get(self, url: str):
+            raise RuntimeError("Unavailable For Legal Reasons (451)")
+
+    client = SimpleNamespace(base_url="https://api.music.yandex.ru", _request=Request())
+
+    with pytest.raises(YandexMusicUnavailableError, match="451"):
+        _ensure_yandex_music_available(client)
 
 
 def test_tracks_from_history_resolves_history_refs_through_client_tracks() -> None:

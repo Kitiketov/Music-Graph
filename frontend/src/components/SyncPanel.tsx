@@ -8,6 +8,7 @@ type Props = {
 };
 
 const syncStages = [
+  { key: "yandex_access", label: "Доступ Яндекса", hint: "Проверяем, доступна ли Яндекс Музыка с этого сервера" },
   { key: "liked_tracks", label: "Лайкнутые треки", hint: "Берем твои сохраненные треки" },
   { key: "liked_artists", label: "Любимые исполнители", hint: "Смотрим лайкнутых артистов" },
   { key: "history_fetch", label: "История", hint: "Получаем историю прослушиваний" },

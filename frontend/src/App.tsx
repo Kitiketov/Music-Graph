@@ -11,6 +11,7 @@ import { LEGAL_VERSION } from "./legal";
 import type { Friend, GraphOverlayMatch, GraphResponse, User } from "./types/api";
 
 const overlayPalette = ["#cf4b3f", "#2f6fbd", "#d79b28", "#7b61ff", "#e26d3d", "#139f8f"];
+const PENDING_INVITE_CODE_KEY = "music_graph_pending_invite_code";
 
 type FriendGraphOverlay = {
   userId: string;
@@ -22,6 +23,48 @@ type FriendGraphOverlay = {
 function overlayColorFor(userId: string): string {
   const hash = [...userId].reduce((sum, char) => sum + char.charCodeAt(0), 0);
   return overlayPalette[hash % overlayPalette.length];
+}
+
+function readStoredInviteCode(): string | null {
+  if (typeof window === "undefined") return null;
+
+  try {
+    return window.sessionStorage.getItem(PENDING_INVITE_CODE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function storePendingInviteCode(code: string): void {
+  if (typeof window === "undefined") return;
+
+  try {
+    window.sessionStorage.setItem(PENDING_INVITE_CODE_KEY, code);
+  } catch {
+    // If sessionStorage is unavailable, keep the code in React state for this page load.
+  }
+}
+
+function clearPendingInviteCode(): void {
+  if (typeof window === "undefined") return;
+
+  try {
+    window.sessionStorage.removeItem(PENDING_INVITE_CODE_KEY);
+  } catch {
+    // Nothing else to clear.
+  }
+}
+
+function readInviteCodeFromUrl(): string | null {
+  if (typeof window === "undefined") return null;
+
+  const match = window.location.pathname.match(/^\/invite\/([^/?#]+)/);
+  if (!match) return null;
+
+  const code = decodeURIComponent(match[1]);
+  storePendingInviteCode(code);
+  window.history.replaceState({}, "", "/");
+  return code;
 }
 
 function normalizeArtistName(name: string): string {
@@ -289,6 +332,8 @@ export function App() {
   const [graph, setGraph] = useState<GraphResponse | null>(null);
   const [friendOverlays, setFriendOverlays] = useState<FriendGraphOverlay[]>([]);
   const friendOverlaysRef = useRef<FriendGraphOverlay[]>([]);
+  const graphRequestSeqRef = useRef(0);
+  const overlayRefreshSeqRef = useRef(0);
   const [loadingOverlayIds, setLoadingOverlayIds] = useState<Set<string>>(new Set());
   const [limit, setLimit] = useState(100);
   const [minListens, setMinListens] = useState(1);
@@ -301,6 +346,9 @@ export function App() {
   const [highlightIntersections, setHighlightIntersections] = useState(false);
   const [loadingGraph, setLoadingGraph] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [pendingInviteCode, setPendingInviteCode] = useState<string | null>(() => {
+    return readInviteCodeFromUrl() ?? readStoredInviteCode();
+  });
 
   useEffect(() => {
     if (!getToken()) return;
@@ -335,21 +383,33 @@ export function App() {
 
   const loadGraph = useCallback(async () => {
     if (!user) return;
+    const requestSeq = graphRequestSeqRef.current + 1;
+    graphRequestSeqRef.current = requestSeq;
     setLoadingGraph(true);
     setError(null);
     try {
       const nextGraph = await api.graphMe(new URLSearchParams(graphParamsString));
+      if (graphRequestSeqRef.current !== requestSeq) return;
       setGraph(nextGraph);
     } catch (graphError) {
+      if (graphRequestSeqRef.current !== requestSeq) return;
       setError(graphError instanceof Error ? graphError.message : "Граф не загрузился");
     } finally {
-      setLoadingGraph(false);
+      if (graphRequestSeqRef.current === requestSeq) {
+        setLoadingGraph(false);
+      }
     }
   }, [graphParamsString, user]);
 
   useEffect(() => {
-    void loadGraph();
-  }, [loadGraph]);
+    if (!user) return;
+
+    const timer = window.setTimeout(() => {
+      void loadGraph();
+    }, 320);
+
+    return () => window.clearTimeout(timer);
+  }, [loadGraph, user]);
 
   const setOverlayLoading = useCallback((friendId: string, isLoading: boolean) => {
     setLoadingOverlayIds((current) => {
@@ -406,44 +466,54 @@ export function App() {
     });
   }, []);
 
+  const handleInviteAccepted = useCallback(() => {
+    clearPendingInviteCode();
+    setPendingInviteCode(null);
+  }, []);
+
   useEffect(() => {
     if (!user || friendOverlaysRef.current.length === 0) return;
 
     let cancelled = false;
-    const overlaysToRefresh = friendOverlaysRef.current.map(({ userId, label, color }) => ({
-      userId,
-      label,
-      color
-    }));
+    const timer = window.setTimeout(() => {
+      const requestSeq = overlayRefreshSeqRef.current + 1;
+      overlayRefreshSeqRef.current = requestSeq;
+      const overlaysToRefresh = friendOverlaysRef.current.map(({ userId, label, color }) => ({
+        userId,
+        label,
+        color
+      }));
 
-    overlaysToRefresh.forEach((overlay) => setOverlayLoading(overlay.userId, true));
-    void Promise.all(
-      overlaysToRefresh.map(async (overlay) => ({
-        ...overlay,
-        graph: await api.graphUser(overlay.userId, new URLSearchParams(graphParamsString))
-      }))
-    )
-      .then((nextOverlays) => {
-        if (cancelled) return;
-        setFriendOverlays((current) =>
-          nextOverlays.filter((overlay) => current.some((item) => item.userId === overlay.userId))
-        );
-      })
-      .catch((overlayError) => {
-        if (cancelled) return;
-        setError(
-          overlayError instanceof Error
-            ? overlayError.message
-            : "Не получилось обновить пересечения друзей"
-        );
-      })
-      .finally(() => {
-        if (cancelled) return;
-        overlaysToRefresh.forEach((overlay) => setOverlayLoading(overlay.userId, false));
-      });
+      overlaysToRefresh.forEach((overlay) => setOverlayLoading(overlay.userId, true));
+      void Promise.all(
+        overlaysToRefresh.map(async (overlay) => ({
+          ...overlay,
+          graph: await api.graphUser(overlay.userId, new URLSearchParams(graphParamsString))
+        }))
+      )
+        .then((nextOverlays) => {
+          if (cancelled || overlayRefreshSeqRef.current !== requestSeq) return;
+          setFriendOverlays((current) =>
+            nextOverlays.filter((overlay) => current.some((item) => item.userId === overlay.userId))
+          );
+        })
+        .catch((overlayError) => {
+          if (cancelled || overlayRefreshSeqRef.current !== requestSeq) return;
+          setError(
+            overlayError instanceof Error
+              ? overlayError.message
+              : "Не получилось обновить пересечения друзей"
+          );
+        })
+        .finally(() => {
+          if (overlayRefreshSeqRef.current !== requestSeq) return;
+          overlaysToRefresh.forEach((overlay) => setOverlayLoading(overlay.userId, false));
+        });
+    }, 320);
 
     return () => {
       cancelled = true;
+      window.clearTimeout(timer);
     };
   }, [graphParamsString, setOverlayLoading, user]);
 
@@ -587,6 +657,8 @@ export function App() {
       <section className="layout">
         <aside className="left-rail">
           <FriendsPanel
+            initialInviteCode={pendingInviteCode}
+            onInviteAccepted={handleInviteAccepted}
             overlayFriendIds={overlayFriendIds}
             loadingOverlayIds={loadingOverlayIdList}
             onToggleOverlayFriend={(friend) => void toggleFriendOverlay(friend)}

@@ -25,6 +25,7 @@ body {
     linear-gradient(135deg, rgba(31, 138, 112, 0.18), transparent 42%),
     radial-gradient(circle at 82% 12%, rgba(215, 155, 40, 0.2), transparent 28%),
     var(--paper);
+  overflow-x: hidden;
 }
 
 button,
@@ -37,13 +38,21 @@ button {
 }
 
 .login-shell {
+  width: 100vw;
+  max-width: 100vw;
   min-height: 100vh;
   display: grid;
-  grid-template-columns: minmax(320px, 1fr) minmax(360px, 520px);
+  grid-template-columns: minmax(0, 1fr) clamp(520px, 35vw, 640px);
+  overflow-x: clip;
+}
+
+.login-shell > * {
+  min-width: 0;
 }
 
 .login-visual {
   position: relative;
+  min-width: 0;
   display: grid;
   place-items: center;
   overflow: hidden;
@@ -96,8 +105,18 @@ button {
   font-weight: 800;
 }
 
+.visual-stage {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+}
+
 .vinyl-disc {
-  width: min(62vw, 620px);
+  position: absolute;
+  top: clamp(16px, 5vh, 62px);
+  right: clamp(-20px, 5vw, 120px);
+  width: min(58vw, 720px);
   aspect-ratio: 1;
   border-radius: 50%;
   background:
@@ -146,13 +165,17 @@ button {
 }
 
 .login-panel {
+  min-width: 0;
   min-height: 100vh;
   display: flex;
   flex-direction: column;
-  justify-content: center;
-  gap: 28px;
-  padding: clamp(28px, 6vw, 72px);
-  background: rgba(255, 253, 247, 0.9);
+  justify-content: flex-start;
+  gap: clamp(18px, 2.4vh, 28px);
+  padding: clamp(48px, 7vh, 76px) clamp(34px, 5vw, 68px) clamp(34px, 5vh, 56px);
+  background:
+    linear-gradient(180deg, rgba(255, 253, 247, 0.96), rgba(255, 253, 247, 0.9)),
+    radial-gradient(circle at 100% 0, rgba(31, 138, 112, 0.14), transparent 34%);
+  box-shadow: -24px 0 60px rgba(40, 47, 52, 0.08);
 }
 
 .eyebrow {
@@ -170,47 +193,59 @@ h2 {
 }
 
 .login-panel h1 {
-  max-width: 10ch;
-  font-size: clamp(2.4rem, 8vw, 5.4rem);
-  line-height: 0.94;
+  max-width: none;
+  padding: 0.08em 0 0.1em;
+  font-size: clamp(2.5rem, 3.35vw, 3.45rem);
+  line-height: 1.08;
+  letter-spacing: -0.055em;
+  white-space: nowrap;
+}
+
+.login-intro {
+  display: grid;
+  gap: 12px;
+}
+
+.login-intro .muted {
+  max-width: 58ch;
+  margin: 0;
+  line-height: 1.55;
 }
 
 .service-overview {
-  width: min(100%, 720px);
+  width: 100%;
   display: grid;
   gap: 14px;
   padding: 18px;
-  border: 1px solid rgba(13, 95, 80, 0.18);
-  border-radius: 12px;
+  border: 1px solid rgba(13, 95, 80, 0.16);
+  border-radius: 18px;
   background:
-    linear-gradient(135deg, rgba(31, 138, 112, 0.12), rgba(215, 155, 40, 0.08)),
-    rgba(255, 255, 255, 0.78);
+    radial-gradient(circle at 100% 0, rgba(215, 155, 40, 0.18), transparent 28%),
+    linear-gradient(135deg, rgba(31, 138, 112, 0.12), rgba(255, 253, 247, 0.86)),
+    rgba(255, 255, 255, 0.82);
   box-shadow: 0 14px 48px rgba(40, 47, 52, 0.1);
 }
 
 .overview-heading,
-.flow-title,
-.privacy-note {
+.flow-title {
   display: flex;
   align-items: flex-start;
   gap: 10px;
 }
 
 .overview-heading svg,
-.flow-title svg,
-.privacy-note svg {
+.flow-title svg {
   flex: 0 0 auto;
   color: var(--green-deep);
 }
 
 .overview-heading h2 {
-  font-size: 1.18rem;
+  font-size: 1.22rem;
 }
 
 .overview-heading p,
 .overview-card p,
-.service-flow p,
-.privacy-note p {
+.service-flow p {
   margin: 4px 0 0;
   color: var(--muted);
   font-size: 0.9rem;
@@ -223,11 +258,28 @@ h2 {
 }
 
 .overview-card {
-  min-height: 116px;
-  padding: 13px;
-  border: 1px solid rgba(217, 224, 223, 0.92);
-  border-radius: 10px;
-  background: rgba(255, 253, 247, 0.86);
+  min-height: 128px;
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  padding: 14px;
+  border: 1px solid rgba(217, 224, 223, 0.86);
+  border-radius: 14px;
+  background: rgba(255, 253, 247, 0.78);
+  transition:
+    transform 160ms ease,
+    box-shadow 160ms ease,
+    border-color 160ms ease;
+}
+
+.overview-card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(31, 138, 112, 0.34);
+  box-shadow: 0 14px 34px rgba(40, 47, 52, 0.1);
+}
+
+.overview-card svg {
+  color: var(--green-deep);
 }
 
 .overview-card strong,
@@ -240,7 +292,7 @@ h2 {
   gap: 8px;
   padding: 12px;
   border: 1px dashed rgba(13, 95, 80, 0.24);
-  border-radius: 10px;
+  border-radius: 14px;
   background: rgba(255, 253, 247, 0.64);
 }
 
@@ -261,12 +313,6 @@ h2 {
   background: var(--green-deep);
   font-size: 0.78rem;
   font-weight: 900;
-}
-
-.privacy-note {
-  padding: 12px;
-  border-radius: 10px;
-  background: rgba(31, 138, 112, 0.1);
 }
 
 .muted {
@@ -301,17 +347,25 @@ h2 {
   display: flex;
   gap: 10px;
   align-items: center;
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 12px;
+  border: 1px solid rgba(217, 224, 223, 0.82);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.64);
   color: var(--muted);
 }
 
 .agreement-card {
-  width: min(100%, 520px);
+  width: 100%;
   display: grid;
   gap: 12px;
   padding: 16px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid rgba(217, 224, 223, 0.9);
+  border-radius: 18px;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.9), rgba(255, 253, 247, 0.72)),
+    rgba(255, 255, 255, 0.78);
   box-shadow: 0 12px 40px rgba(40, 47, 52, 0.08);
 }
 
@@ -329,11 +383,12 @@ h2 {
 
 .agreement-card ul {
   display: grid;
-  gap: 8px;
+  gap: 7px;
   margin: 0;
   padding-left: 18px;
   color: var(--muted);
-  font-size: 0.9rem;
+  font-size: 0.88rem;
+  line-height: 1.42;
 }
 
 .text-action {
@@ -348,13 +403,13 @@ h2 {
 }
 
 .legal-text {
-  max-height: 260px;
+  max-height: 340px;
   overflow: auto;
   display: grid;
   gap: 10px;
-  padding: 12px;
+  padding: 14px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 14px;
   background: #fffdf7;
 }
 
@@ -365,6 +420,7 @@ h2 {
 }
 
 .legal-text h2 {
+  color: var(--green-deep);
   font-size: 1rem;
 }
 
@@ -375,12 +431,17 @@ h2 {
 .legal-text p {
   color: var(--muted);
   font-size: 0.88rem;
+  line-height: 1.5;
 }
 
 .agreement-check {
   display: flex;
   gap: 10px;
   align-items: flex-start;
+  padding: 10px 12px;
+  border: 1px solid rgba(31, 138, 112, 0.14);
+  border-radius: 14px;
+  background: rgba(31, 138, 112, 0.07);
   font-weight: 750;
 }
 
@@ -1235,13 +1296,13 @@ h2 {
   top: 14px;
   left: 14px;
   max-width: min(520px, calc(100% - 28px));
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: 1fr auto;
   align-items: center;
-  gap: 8px;
-  padding: 10px 12px;
+  gap: 8px 14px;
+  padding: 12px 14px;
   border: 1px solid rgba(104, 112, 122, 0.22);
-  border-radius: 999px;
+  border-radius: 18px;
   background: rgba(255, 253, 247, 0.92);
   box-shadow: 0 10px 34px rgba(40, 47, 52, 0.12);
   font-size: 0.86rem;
@@ -1252,13 +1313,14 @@ h2 {
 }
 
 .graph-focus-hint span {
+  grid-column: 1 / -1;
   color: var(--muted);
 }
 
 .graph-focus-hint button {
   border: 0;
-  border-radius: 999px;
-  padding: 6px 9px;
+  border-radius: 12px;
+  padding: 8px 12px;
   color: white;
   background: var(--ink);
   font-weight: 800;
@@ -1835,11 +1897,30 @@ h2 {
   }
 
   .login-visual {
-    min-height: 34vh;
+    min-height: clamp(460px, 62vh, 620px);
   }
 
   .login-panel {
-    min-height: 66vh;
+    min-height: auto;
+    padding: 42px clamp(24px, 6vw, 56px) 52px;
+  }
+
+  .login-panel h1 {
+    font-size: clamp(2.15rem, 6vw, 3.2rem);
+    white-space: nowrap;
+  }
+
+  .visual-stage {
+    position: absolute;
+    inset: 0;
+    width: auto;
+    margin: 0;
+  }
+
+  .vinyl-disc {
+    top: clamp(30px, 8vh, 74px);
+    right: clamp(-150px, -18vw, -70px);
+    width: min(74vw, 560px);
   }
 
   .left-rail {
@@ -1875,21 +1956,36 @@ h2 {
     padding: 12px;
   }
 
-  .login-panel h1 {
-    max-width: none;
-    font-size: 2.7rem;
-  }
-
-  .visual-copy {
-    position: relative;
-    left: auto;
-    right: auto;
-    top: auto;
+  .login-visual {
+    min-height: 520px;
     padding: 28px;
   }
 
+  .login-panel h1 {
+    max-width: none;
+    font-size: clamp(1.85rem, 7vw, 2.3rem);
+    white-space: nowrap;
+  }
+
+  .visual-copy {
+    max-width: none;
+  }
+
+  .visual-copy h2 {
+    max-width: 11ch;
+    font-size: 3.1rem;
+  }
+
+  .visual-stage {
+    inset: 0;
+    width: auto;
+    margin: 0;
+  }
+
   .vinyl-disc {
-    width: min(86vw, 360px);
+    top: 150px;
+    right: -112px;
+    width: min(86vw, 390px);
   }
 
   .overview-grid,

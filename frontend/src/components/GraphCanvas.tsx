@@ -18,6 +18,7 @@ type SimEdge = Omit<GraphEdge, "source" | "target"> & {
   source: SimNode | string;
   target: SimNode | string;
 };
+type CachedPosition = Pick<d3.SimulationNodeDatum, "x" | "y" | "vx" | "vy">;
 
 function nodeWeight(node: GraphNode): number {
   if (typeof node.knownTrackCount === "number" && node.knownTrackCount > 0) {
@@ -96,6 +97,29 @@ function graphEdgeKey(edge: GraphEdge): string {
   return `${edge.type}:${edge.source}:${edge.target}`;
 }
 
+function numericHash(value: string): number {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function seedNodePosition(node: SimNode, index: number, width: number, height: number): SimNode {
+  const hash = numericHash(node.id);
+  const angle = (hash / 0xffffffff) * Math.PI * 2;
+  const ring = 0.18 + (index % 11) * 0.035;
+  const radius = Math.min(width, height) * ring;
+  return {
+    ...node,
+    x: width / 2 + Math.cos(angle) * radius,
+    y: height / 2 + Math.sin(angle) * radius,
+    vx: 0,
+    vy: 0
+  };
+}
+
 export function GraphCanvas({
   graph,
   search,
@@ -107,6 +131,7 @@ export function GraphCanvas({
   highlightIntersections = false
 }: Props) {
   const svgRef = useRef<SVGSVGElement | null>(null);
+  const positionCacheRef = useRef<Map<string, CachedPosition>>(new Map());
   const [hovered, setHovered] = useState<GraphNode | null>(null);
   const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
   const normalizedSearch = search.trim().toLowerCase();
@@ -255,13 +280,38 @@ export function GraphCanvas({
 
     const width = svg.clientWidth || 960;
     const height = svg.clientHeight || 640;
-    const nodes: SimNode[] = visibleGraph.nodes.map((node) => ({ ...node }));
+    const positionCache = positionCacheRef.current;
+    const nodes: SimNode[] = visibleGraph.nodes.map((node, index) => {
+      const cached = positionCache.get(node.id);
+      if (
+        cached &&
+        Number.isFinite(cached.x) &&
+        Number.isFinite(cached.y)
+      ) {
+        return {
+          ...node,
+          x: cached.x,
+          y: cached.y,
+          vx: cached.vx ?? 0,
+          vy: cached.vy ?? 0
+        };
+      }
+      return seedNodePosition({ ...node }, index, width, height);
+    });
     const nodeMap = new Map(nodes.map((node) => [node.id, node]));
     const links: SimEdge[] = visibleGraph.edges
       .filter((edge) => nodeMap.has(edge.source) && nodeMap.has(edge.target))
       .map((edge) => ({ ...edge }));
+    const isLargeGraph = nodes.length > 300 || links.length > 700;
+    const isHugeGraph = nodes.length > 900 || links.length > 2200;
     const radiusById = new Map(nodes.map((item) => [item.id, nodeRadius(item)]));
     const radiusOf = (item: GraphNode) => radiusById.get(item.id) ?? nodeRadius(item);
+    const labelNodeIds = new Set(
+      [...nodes]
+        .sort((left, right) => nodeWeight(right) - nodeWeight(left))
+        .slice(0, isHugeGraph ? 80 : isLargeGraph ? 140 : nodes.length)
+        .map((node) => node.id)
+    );
 
     const root = d3.select(svg);
     root.selectAll("*").remove();
@@ -481,6 +531,7 @@ export function GraphCanvas({
       .attr("text-anchor", "middle");
 
     node
+      .filter((item) => !isLargeGraph || labelNodeIds.has(item.id) || contextTiers.has(item.id))
       .append("text")
       .text((item) => item.name)
       .attr("dy", (item) => radiusOf(item) + 18)
@@ -496,9 +547,21 @@ export function GraphCanvas({
           .distance(edgeDistance)
           .strength(edgeStrength)
       )
-      .force("charge", d3.forceManyBody().strength(-repulsionStrength))
+      .force("charge", d3.forceManyBody().strength(-repulsionStrength).theta(isLargeGraph ? 1.15 : 0.9))
       .force("center", d3.forceCenter(width / 2, height / 2))
-      .force("collision", d3.forceCollide<SimNode>().radius((item) => radiusOf(item) + 34));
+      .force("x", d3.forceX<SimNode>(width / 2).strength(isLargeGraph ? 0.012 : 0.018))
+      .force("y", d3.forceY<SimNode>(height / 2).strength(isLargeGraph ? 0.012 : 0.018))
+      .force(
+        "collision",
+        d3
+          .forceCollide<SimNode>()
+          .radius((item) => radiusOf(item) + (isHugeGraph ? 20 : 34))
+          .strength(isLargeGraph ? 0.76 : 0.92)
+          .iterations(isLargeGraph ? 1 : 2)
+      )
+      .alpha(isLargeGraph ? 0.72 : 1)
+      .alphaDecay(isLargeGraph ? 0.048 : 0.028)
+      .velocityDecay(isLargeGraph ? 0.58 : 0.46);
 
     node.call(
       d3
@@ -546,6 +609,14 @@ export function GraphCanvas({
         linkLayer.transition().duration(180).attr("opacity", "1");
       }
       node.attr("transform", (item) => `translate(${item.x ?? 0},${item.y ?? 0})`);
+      for (const item of nodes) {
+        positionCache.set(item.id, {
+          x: item.x,
+          y: item.y,
+          vx: item.vx,
+          vy: item.vy
+        });
+      }
       frameId = null;
     };
     const scheduleRender = () => {
@@ -553,12 +624,23 @@ export function GraphCanvas({
       frameId = window.requestAnimationFrame(renderTick);
     };
 
+    if (isLargeGraph) {
+      simulation.tick(isHugeGraph ? 10 : 16);
+    }
     scheduleRender();
     simulation.on("tick", scheduleRender);
 
     return () => {
       if (frameId !== null) {
         window.cancelAnimationFrame(frameId);
+      }
+      for (const item of nodes) {
+        positionCache.set(item.id, {
+          x: item.x,
+          y: item.y,
+          vx: item.vx,
+          vy: item.vy
+        });
       }
       simulation.stop();
     };

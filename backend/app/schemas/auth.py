@@ -4,8 +4,8 @@ from uuid import UUID
 
 from pydantic import BaseModel
 
-CURRENT_TERMS_VERSION = "2026-04-26"
-CURRENT_PRIVACY_VERSION = "2026-04-26"
+CURRENT_TERMS_VERSION = "2026-04-28"
+CURRENT_PRIVACY_VERSION = "2026-04-28"
 
 
 class UserOut(BaseModel):

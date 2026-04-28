@@ -10,8 +10,13 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml ./
+
+# Keep dependency installation cached when only application code changes.
+RUN mkdir app \
+    && touch app/__init__.py \
+    && pip install --no-cache-dir -e ".[dev]"
+
 COPY app ./app
-RUN pip install --no-cache-dir -e ".[dev]"
 
 COPY alembic.ini ./
 COPY alembic ./alembic

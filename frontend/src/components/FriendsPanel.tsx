@@ -1,9 +1,11 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Link2, Plus, Trash2, UserPlus, Users, X } from "lucide-react";
 import { api } from "../api/client";
 import type { Friend, InviteCreateResponse } from "../types/api";
 
 type Props = {
+  initialInviteCode?: string | null;
+  onInviteAccepted?: () => void;
   overlayFriendIds: string[];
   loadingOverlayIds: string[];
   onToggleOverlayFriend: (friend: Friend) => void;
@@ -11,6 +13,8 @@ type Props = {
 };
 
 export function FriendsPanel({
+  initialInviteCode,
+  onInviteAccepted,
   overlayFriendIds,
   loadingOverlayIds,
   onToggleOverlayFriend,
@@ -22,14 +26,44 @@ export function FriendsPanel({
   const [message, setMessage] = useState<string | null>(null);
   const [deletingFriendIds, setDeletingFriendIds] = useState<Set<string>>(new Set());
 
-  async function loadFriends() {
+  const loadFriends = useCallback(async () => {
     const response = await api.friends();
     setFriends(response.friends);
-  }
+  }, []);
 
   useEffect(() => {
     void loadFriends();
-  }, []);
+  }, [loadFriends]);
+
+  useEffect(() => {
+    if (!initialInviteCode) return;
+
+    const code = initialInviteCode;
+    let cancelled = false;
+
+    async function acceptFromLink() {
+      try {
+        await api.acceptInvite(code);
+        if (cancelled) return;
+
+        setInviteCode("");
+        setMessage("Друг добавлен по ссылке приглашения");
+        onInviteAccepted?.();
+        await loadFriends();
+      } catch (error) {
+        if (cancelled) return;
+
+        setInviteCode(code);
+        setMessage(error instanceof Error ? error.message : "Не удалось принять приглашение");
+      }
+    }
+
+    void acceptFromLink();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [initialInviteCode, loadFriends, onInviteAccepted]);
 
   async function createInvite() {
     const created = await api.invite();

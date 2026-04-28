@@ -1,5 +1,14 @@
 import { useEffect, useRef, useState } from "react";
-import { Copy, ExternalLink, Music2, Network, RefreshCcw, ShieldCheck, Smartphone, Users } from "lucide-react";
+import {
+  Copy,
+  ExternalLink,
+  Music2,
+  Network,
+  RefreshCcw,
+  Smartphone,
+  Sparkles,
+  Users
+} from "lucide-react";
 import { api, setToken } from "../api/client";
 import { LEGAL_VERSION, legalSummary, privacyText, termsText } from "../legal";
 import type { DeviceStartResponse, QrStartResponse, User } from "../types/api";
@@ -10,27 +19,31 @@ type Props = {
 
 const serviceCards = [
   {
-    title: "Музыкальная карта",
-    text: "Пузырьки — это артисты из твоих лайков, истории, знакомых треков и Моей волны. Чем больше знакомых треков, тем крупнее артист."
+    icon: Network,
+    title: "Граф артистов",
+    text: "Пузырьки показывают исполнителей из лайков, истории, Моей волны и знакомых треков. Чем больше знакомых песен, тем крупнее артист."
   },
   {
-    title: "Коллабы и связи",
-    text: "Зеленые линии показывают треки, которые ты реально слышал. Синие связи можно включить отдельно — это найденные коллабы из дискографии."
+    icon: Music2,
+    title: "Коллабы без гадания",
+    text: "Зелёные связи строятся по трекам, которые ты реально слушал. Отдельно можно включить найденные, но ещё не прослушанные коллабы из дискографии."
   },
   {
+    icon: Sparkles,
     title: "Похожие артисты",
-    text: "Похожие артисты добавляются только если Яндекс видит у тебя больше 0 знакомых треков, чтобы граф не превращался в случайную кашу."
+    text: "Похожие добавляются только если у Яндекса есть больше 0 знакомых тебе треков, чтобы граф не превращался в случайную рекламную кашу."
   },
   {
-    title: "Друзья и сравнение",
-    text: "Можно обменяться приглашением, открыть граф друга и увидеть общих артистов, пересечение вкусов и общие музыкальные острова."
+    icon: Users,
+    title: "Друзья и пересечения",
+    text: "Можно принять приглашение, наложить граф друга поверх своего и увидеть общих артистов, общие треки и зоны, где вкусы пересекаются."
   }
 ];
 
 const serviceSteps = [
-  "Входишь через QR-страницу Яндекса.",
-  "Сервис синхронизирует лайки, историю, знакомые треки артистов и связи.",
-  "Граф можно фильтровать по глубине, коллабам, похожим артистам и силе отталкивания."
+  "Входишь через страницу Яндекса: QR на компьютере или код устройства на телефоне.",
+  "Сервис синхронизирует лайки, историю, Мою волну, знакомые треки артистов, коллабы и похожих исполнителей.",
+  "После синхронизации можно фильтровать граф, менять глубину, включать друзей и собирать плейлисты из пересечений или неизученных коллабов."
 ];
 
 export function LoginScreen({ onLogin }: Props) {
@@ -39,7 +52,7 @@ export function LoginScreen({ onLogin }: Props) {
   const [device, setDevice] = useState<DeviceStartResponse | null>(null);
   const [authMethod, setAuthMethod] = useState<"qr" | "device">("qr");
   const [isMobileDevice, setIsMobileDevice] = useState(false);
-  const [status, setStatus] = useState("Прими соглашение, чтобы создать QR-вход");
+  const [status, setStatus] = useState("Прими соглашение, чтобы создать вход через Яндекс");
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [accepted, setAccepted] = useState(false);
@@ -80,13 +93,13 @@ export function LoginScreen({ onLogin }: Props) {
 
         if (state.status === "failed" || state.status === "expired") {
           window.clearInterval(timer);
-          setError(state.message ?? "QR-сессия входа не завершилась");
+          setError(state.message ?? "Сессия входа не завершилась");
           return;
         }
 
         setStatus(
           authMethod === "device"
-            ? "Жду подтверждение входа по коду в Яндексе..."
+            ? "Жду подтверждение кода на странице Яндекса..."
             : "Жду подтверждение QR-входа в Яндексе..."
         );
       } catch (pollError) {
@@ -149,11 +162,11 @@ export function LoginScreen({ onLogin }: Props) {
     if (popup) {
       qrWindowRef.current = popup;
       popup.focus();
-      setStatus("QR открыт отдельным окном. Жду подтверждение входа...");
+      setStatus("QR открыт отдельным окном. Подтверди вход в Яндексе, это окно закроется само.");
       return;
     }
 
-    setError("Браузер заблокировал отдельное окно. Разреши pop-up или открой QR-ссылку ниже.");
+    setError("Браузер заблокировал отдельное окно. Разреши pop-up или скопируй QR-ссылку ниже.");
   }
 
   async function startQrLogin() {
@@ -168,7 +181,7 @@ export function LoginScreen({ onLogin }: Props) {
     setCopied(null);
     setDevice(null);
     setQr(null);
-    setStatus("Создаем QR-страницу авторизации Яндекса...");
+    setStatus("Создаём QR-страницу авторизации Яндекса...");
 
     try {
       const started = await api.startQr({
@@ -177,7 +190,7 @@ export function LoginScreen({ onLogin }: Props) {
         privacy_version: LEGAL_VERSION
       });
       setQr(started);
-      setStatus("Открываю QR-окно. Подтверди вход в Яндексе...");
+      setStatus("Открываю QR-окно. Подтверди вход на странице Яндекса...");
     } catch (startError) {
       setError(startError instanceof Error ? startError.message : "Не удалось создать QR-вход через Яндекс");
     } finally {
@@ -197,7 +210,7 @@ export function LoginScreen({ onLogin }: Props) {
     setCopied(null);
     setQr(null);
     setDevice(null);
-    setStatus("Создаем код входа для мобильного устройства...");
+    setStatus("Создаём код входа для мобильного устройства...");
 
     try {
       const started = await api.startDevice({
@@ -222,7 +235,7 @@ export function LoginScreen({ onLogin }: Props) {
       setCopied("QR-ссылка скопирована");
       window.setTimeout(() => setCopied(null), 1800);
     } catch {
-      setError("Не удалось скопировать QR-ссылку. Открой ее кнопкой ниже.");
+      setError("Не удалось скопировать QR-ссылку. Открой её кнопкой ниже.");
     }
   }
 
@@ -258,39 +271,46 @@ export function LoginScreen({ onLogin }: Props) {
 
   return (
     <main className="login-shell">
-      <section className="login-visual" aria-hidden="true">
+      <section className="login-visual" aria-label="Описание Music Graph">
         <div className="visual-copy">
           <p className="eyebrow">Music Graph</p>
-          <h2>Твой вкус как сеть артистов</h2>
+          <h2>Твой музыкальный вкус как живая карта</h2>
           <p>
-            Не просто список любимых треков, а живая карта: кто с кем связан, кого ты уже знаешь
-            и где рядом спрятаны новые коллабы.
+            Сервис собирает артистов, коллабы, похожих исполнителей и пересечения с друзьями в один граф, чтобы было
+            видно не только что ты слушаешь, но и как музыка связана между собой.
           </p>
-          <div className="visual-stats">
+          <div className="visual-stats" aria-label="Основные источники графа">
             <span>лайки</span>
-            <span>волна</span>
-            <span>коллабы</span>
+            <span>история</span>
+            <span>Моя волна</span>
+            <span>друзья</span>
           </div>
         </div>
-        <div className="vinyl-disc">
-          <div className="vinyl-label">
-            <Music2 size={38} />
+
+        <div className="visual-stage" aria-hidden="true">
+          <div className="vinyl-disc">
+            <div className="vinyl-label">
+              <Music2 size={38} />
+            </div>
           </div>
-        </div>
-        <div className="signal-lines">
-          <span />
-          <span />
-          <span />
+
+          <div className="signal-lines">
+            <span>
+              <i />
+            </span>
+            <span />
+            <span />
+          </div>
         </div>
       </section>
 
       <section className="login-panel">
-        <div>
-          <p className="eyebrow">Music Graph</p>
-          <h1>QR-вход Яндекс</h1>
+        <div className="login-intro">
+          <p className="eyebrow">Вход через Яндекс Музыку</p>
+          <h1>Собрать мой граф</h1>
           <p className="muted">
-            Сначала прими условия хранения музыкальных данных. Затем выбери вход через QR или через код устройства
-            (удобно на мобильном), подтверди вход в Яндексе и оставь этот сайт открытым.
+            Сначала прими условия обработки данных, затем выбери QR или код устройства. Авторизация проходит на стороне
+            Яндекса, а здесь мы только ждём подтверждение и запускаем синхронизацию.
           </p>
         </div>
 
@@ -298,18 +318,22 @@ export function LoginScreen({ onLogin }: Props) {
           <div className="overview-heading">
             <Network size={20} />
             <div>
-              <h2>Что это за сервис</h2>
-              <p>Music Graph превращает твой аккаунт Яндекс Музыки в интерактивный граф артистов.</p>
+              <h2>Что будет после входа</h2>
+              <p>Не плоский список лайков, а интерактивная карта музыкальных связей.</p>
             </div>
           </div>
 
           <div className="overview-grid">
-            {serviceCards.map((card) => (
-              <article className="overview-card" key={card.title}>
-                <strong>{card.title}</strong>
-                <p>{card.text}</p>
-              </article>
-            ))}
+            {serviceCards.map((card) => {
+              const Icon = card.icon;
+              return (
+                <article className="overview-card" key={card.title}>
+                  <Icon size={18} />
+                  <strong>{card.title}</strong>
+                  <p>{card.text}</p>
+                </article>
+              );
+            })}
           </div>
 
           <div className="service-flow">
@@ -324,19 +348,11 @@ export function LoginScreen({ onLogin }: Props) {
               </p>
             ))}
           </div>
-
-          <div className="privacy-note">
-            <ShieldCheck size={18} />
-            <p>
-              Токены хранятся зашифрованно, данные можно удалить кнопкой в приложении. Перед входом ниже нужно принять
-              соглашение, потому что сервис сохраняет музыкальные данные для построения графа.
-            </p>
-          </div>
         </section>
 
         <section className="agreement-card">
           <div className="agreement-heading">
-            <strong>Соглашение и обработка данных</strong>
+            <strong>Условия и данные</strong>
             <span>версия {LEGAL_VERSION}</span>
           </div>
           <ul>
@@ -413,8 +429,8 @@ export function LoginScreen({ onLogin }: Props) {
             </button>
 
             <p className="muted small">
-              На компьютере QR открывается автоматически после создания. Если браузер запретил pop-up, разреши его
-              и нажми "Создать новый QR". После успешного входа окно закроется автоматически.
+              На компьютере QR открывается автоматически отдельным окном. Если браузер запретил pop-up, разреши его или
+              нажми «Создать новый QR».
             </p>
 
             {copied && <p className="copy-status">{copied}</p>}
@@ -450,8 +466,8 @@ export function LoginScreen({ onLogin }: Props) {
           <button className="primary-action" disabled={!accepted || starting} onClick={startSelectedLogin}>
             {starting
               ? authMethod === "device"
-                ? "Создаем код входа..."
-                : "Создаем QR-вход..."
+                ? "Создаём код входа..."
+                : "Создаём QR-вход..."
               : authMethod === "device"
                 ? "Принять и создать код входа"
                 : "Принять и создать QR"}
