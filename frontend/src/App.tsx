@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties } from "react";
-import { Filter, LogOut, Search, SlidersHorizontal, Trash2 } from "lucide-react";
-import { api, clearToken, getToken } from "./api/client";
+import type { CSSProperties, KeyboardEvent, PointerEvent } from "react";
+import * as d3 from "d3";
+import { Copy, Download, Filter, LogOut, Search, Share2, SlidersHorizontal, Trash2, X } from "lucide-react";
+import { API_BASE_URL, api, clearToken, getToken } from "./api/client";
 import { FriendsPanel } from "./components/FriendsPanel";
 import { GraphCanvas } from "./components/GraphCanvas";
 import { LoginScreen } from "./components/LoginScreen";
@@ -12,6 +13,12 @@ import type { Friend, GraphOverlayMatch, GraphResponse, User } from "./types/api
 
 const overlayPalette = ["#cf4b3f", "#2f6fbd", "#d79b28", "#7b61ff", "#e26d3d", "#139f8f"];
 const PENDING_INVITE_CODE_KEY = "music_graph_pending_invite_code";
+const SHARE_MAX_GRAPH_PARAMS = {
+  limit: "5000",
+  min_listens: "1",
+  depth: "3",
+  edge_types: "collab,catalog_collab,similar"
+};
 
 type FriendGraphOverlay = {
   userId: string;
@@ -27,6 +34,28 @@ type ClusterIslandsPanelProps = {
   onHoverCluster: (clusterId: string | null) => void;
   onSelectCluster: (clusterId: string | null) => void;
 };
+
+function captureRangePointer(event: PointerEvent<HTMLInputElement>) {
+  try {
+    event.currentTarget.setPointerCapture(event.pointerId);
+  } catch {
+    // Pointer capture is unavailable for a few synthetic/browser-specific range events.
+  }
+}
+
+function releaseRangePointer(event: PointerEvent<HTMLInputElement>) {
+  try {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  } catch {
+    // Keep range commits resilient across browsers.
+  }
+}
+
+function shouldCommitRangeKey(event: KeyboardEvent<HTMLInputElement>) {
+  return event.key === "Enter";
+}
 
 function overlayColorFor(userId: string): string {
   const hash = [...userId].reduce((sum, char) => sum + char.charCodeAt(0), 0);
@@ -145,6 +174,1156 @@ function graphNodeScoreLabel(node: GraphResponse["nodes"][number]) {
     parts.push(`${node.trackCount} в графе`);
   }
   return parts.join(", ");
+}
+
+function formatCompactNumber(value: number): string {
+  return new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(value);
+}
+
+function clampText(value: string, maxLength: number): string {
+  return value.length > maxLength ? `${value.slice(0, maxLength - 1)}…` : value;
+}
+
+function shareCardDimensions() {
+  return { width: 1080, height: 1350 };
+}
+
+function topGraphArtists(graph: GraphResponse, count: number) {
+  return [...graph.nodes]
+    .filter((node) => graphNodeScore(node) > 0)
+    .sort((left, right) => graphNodeScore(right) - graphNodeScore(left) || left.name.localeCompare(right.name, "ru"))
+    .slice(0, count);
+}
+
+function shareEdgeTypePriority(type: string): number {
+  if (type === "catalog_collab") return 0;
+  if (type === "collab") return 1;
+  return 2;
+}
+
+function shareCardColor(index: number, clusterColor?: string) {
+  return clusterColor ?? ["#0d7f69", "#cf4b3f", "#2f6fbd", "#d79b28", "#7b61ff", "#e26d3d"][index % 6];
+}
+
+function artistInitials(name: string) {
+  const letters = name
+    .split(/\s+/)
+    .map((part) => part.trim()[0])
+    .filter(Boolean)
+    .join("");
+  return (letters || name.slice(0, 2)).slice(0, 2).toUpperCase();
+}
+
+type ShareCardFrameNode = {
+  id: string;
+  name: string;
+  image?: string | null;
+  clusterId?: string | null;
+  score: number;
+  color: string;
+  x: number;
+  y: number;
+  radius: number;
+};
+
+type ShareCardFrameEdge = {
+  source: string;
+  target: string;
+  type: string;
+  weight: number;
+};
+
+type ShareCardFrameScene = {
+  nodes: ShareCardFrameNode[];
+  edges: ShareCardFrameEdge[];
+  title: string;
+  subtitle: string;
+  color: string;
+};
+
+type ShareCardIslandShape = {
+  id: string;
+  color: string;
+  centerX: number;
+  centerY: number;
+  points: [number, number][];
+  path: string;
+};
+
+const shareCardFrameLayout = [
+  { x: 540, y: 600, radius: 76 },
+  { x: 312, y: 492, radius: 56 },
+  { x: 772, y: 498, radius: 56 },
+  { x: 330, y: 735, radius: 50 },
+  { x: 760, y: 724, radius: 50 },
+  { x: 540, y: 378, radius: 46 },
+  { x: 545, y: 842, radius: 46 },
+  { x: 180, y: 620, radius: 38 },
+  { x: 906, y: 616, radius: 38 },
+  { x: 430, y: 430, radius: 36 },
+  { x: 652, y: 430, radius: 36 },
+  { x: 430, y: 818, radius: 34 },
+  { x: 655, y: 812, radius: 34 }
+];
+
+function shareCardIslandStory(graph: GraphResponse) {
+  const nodeById = new Map(graph.nodes.map((node) => [node.id, node]));
+  const collabEdges = graph.edges.filter((edge) => edge.type === "collab");
+  const stories = graph.clusters
+    .map((cluster) => {
+      const clusterNodeIds = new Set(cluster.nodeIds.filter((id) => nodeById.has(id)));
+      const nodes = [...clusterNodeIds]
+        .map((id) => nodeById.get(id))
+        .filter((node): node is GraphResponse["nodes"][number] => Boolean(node));
+      const edges = collabEdges.filter((edge) => clusterNodeIds.has(edge.source) && clusterNodeIds.has(edge.target));
+      const weight = edges.reduce((sum, edge) => sum + edge.weight, 0);
+      const known = nodes.reduce((sum, node) => sum + graphNodeScore(node), 0);
+      return {
+        cluster,
+        nodes,
+        edges,
+        score: edges.length * 1000 + weight * 20 + known + nodes.length
+      };
+    })
+    .filter((story) => story.nodes.length > 1 && story.edges.length > 0)
+    .sort((left, right) => right.score - left.score || right.nodes.length - left.nodes.length);
+
+  const story = stories[0];
+  if (!story) return null;
+
+  const degreeById = new Map<string, number>();
+  for (const edge of story.edges) {
+    degreeById.set(edge.source, (degreeById.get(edge.source) ?? 0) + edge.weight);
+    degreeById.set(edge.target, (degreeById.get(edge.target) ?? 0) + edge.weight);
+  }
+
+  const orderedNodes = [...story.nodes].sort(
+    (left, right) =>
+      (degreeById.get(right.id) ?? 0) - (degreeById.get(left.id) ?? 0) ||
+      graphNodeScore(right) - graphNodeScore(left) ||
+      left.name.localeCompare(right.name, "ru")
+  );
+  const selectedIds: string[] = [];
+  const selectedSet = new Set<string>();
+  const addNode = (nodeId: string) => {
+    if (selectedSet.has(nodeId) || !nodeById.has(nodeId) || selectedIds.length >= 10) return;
+    selectedSet.add(nodeId);
+    selectedIds.push(nodeId);
+  };
+
+  if (orderedNodes[0]) addNode(orderedNodes[0].id);
+  while (selectedIds.length < Math.min(10, orderedNodes.length)) {
+    const neighbors = story.edges
+      .flatMap((edge) => {
+        const sourceSelected = selectedSet.has(edge.source);
+        const targetSelected = selectedSet.has(edge.target);
+        if (sourceSelected && !targetSelected) return [edge.target];
+        if (targetSelected && !sourceSelected) return [edge.source];
+        return [];
+      })
+      .filter((id, index, list) => !selectedSet.has(id) && list.indexOf(id) === index)
+      .sort(
+        (left, right) =>
+          (degreeById.get(right) ?? 0) - (degreeById.get(left) ?? 0) ||
+          graphNodeScore(nodeById.get(right)!) - graphNodeScore(nodeById.get(left)!)
+      );
+    const nextId = neighbors[0] ?? orderedNodes.find((node) => !selectedSet.has(node.id))?.id;
+    if (!nextId) break;
+    addNode(nextId);
+  }
+
+  const selectedNodes = selectedIds
+    .map((id) => nodeById.get(id))
+    .filter((node): node is GraphResponse["nodes"][number] => Boolean(node));
+  const selectedNodeIds = new Set(selectedNodes.map((node) => node.id));
+  return {
+    cluster: story.cluster,
+    nodes: selectedNodes,
+    edges: story.edges.filter((edge) => selectedNodeIds.has(edge.source) && selectedNodeIds.has(edge.target))
+  };
+}
+
+function shareCardFrameScene(graph: GraphResponse): ShareCardFrameScene {
+  const clusterById = new Map((graph.clusters ?? []).map((cluster) => [cluster.id, cluster]));
+  const selectedNodes = topGraphArtists(graph, 10);
+  const nodes: ShareCardFrameNode[] = selectedNodes.map((node, index) => {
+    const layout = shareCardFrameLayout[index] ?? shareCardFrameLayout[shareCardFrameLayout.length - 1];
+    const scoreRadius = 34 + Math.sqrt(Math.max(graphNodeScore(node), 1)) * 2.4;
+    const clusterColor = node.clusterId ? clusterById.get(node.clusterId)?.color : undefined;
+    return {
+      id: node.id,
+      name: node.name,
+      image: node.image,
+      clusterId: node.clusterId,
+      score: graphNodeScore(node),
+      color: shareCardColor(index, clusterColor),
+      x: layout.x,
+      y: layout.y,
+      radius: Math.max(32, Math.min(layout.radius, scoreRadius))
+    };
+  });
+
+  const selectedIds = new Set(nodes.map((node) => node.id));
+  const edges = graph.edges
+    .filter((edge) => selectedIds.has(edge.source) && selectedIds.has(edge.target))
+    .sort((left, right) => shareEdgeTypePriority(left.type) - shareEdgeTypePriority(right.type) || right.weight - left.weight)
+    .slice(0, 22)
+    .map((edge) => ({ source: edge.source, target: edge.target, type: edge.type, weight: edge.weight }));
+
+  if (edges.length === 0 && nodes.length > 1) {
+    edges.push(
+      ...nodes.slice(1).map((node) => ({
+        source: nodes[0].id,
+        target: node.id,
+        type: "preview",
+        weight: 1
+      }))
+    );
+  }
+
+  return {
+    nodes,
+    edges: edges as ShareCardFrameEdge[],
+    title: "Острова и связи",
+    subtitle: "Артисты и связи между ними",
+    color: nodes[0]?.color ?? "#0d7f69"
+  };
+}
+
+function islandBlobPoints(centerX: number, centerY: number, radiusX: number, radiusY: number, seed: number, vertices = 18): [number, number][] {
+  const points: [number, number][] = [];
+  for (let index = 0; index < vertices; index += 1) {
+    const angle = (Math.PI * 2 * index) / vertices;
+    const wobble = 0.86 + (((Math.sin(seed * 1.91 + index * 2.17) + Math.cos(seed * 0.73 + index * 1.31)) / 2 + 1) / 2) * 0.22;
+    const x = centerX + Math.cos(angle) * radiusX * wobble;
+    const y = centerY + Math.sin(angle) * radiusY * (0.9 + (wobble - 0.86) * 0.65);
+    points.push([Math.max(82, Math.min(998, x)), Math.max(284, Math.min(908, y))]);
+  }
+  return points;
+}
+
+function polygonFromPoints(points: [number, number][]) {
+  const hull = d3.polygonHull(points);
+  const polygon = (hull ?? points) as [number, number][];
+  const smoothPath =
+    d3
+      .line<[number, number]>()
+      .x((point) => point[0])
+      .y((point) => point[1])
+      .curve(d3.curveBasisClosed)(polygon) ?? "";
+  return {
+    points: polygon,
+    path: smoothPath
+  };
+}
+
+function shareCardIslandShapes(graph: GraphResponse, nodes: ShareCardFrameNode[]): ShareCardIslandShape[] {
+  const nodeById = new Map(graph.nodes.map((node) => [node.id, node]));
+  const clusterById = new Map((graph.clusters ?? []).map((cluster) => [cluster.id, cluster]));
+  const nodesByCluster = new Map<string, ShareCardFrameNode[]>();
+  nodes.forEach((node) => {
+    const id = node.clusterId ?? `artist-${node.id}`;
+    nodesByCluster.set(id, [...(nodesByCluster.get(id) ?? []), node]);
+  });
+
+  const shapes: ShareCardIslandShape[] = [...nodesByCluster.entries()].map(([id, clusterNodes], index) => {
+    const cluster = clusterById.get(id);
+    const centerX = d3.mean(clusterNodes, (node) => node.x) ?? 540;
+    const centerY = d3.mean(clusterNodes, (node) => node.y) ?? 600;
+    const maxDistance = d3.max(clusterNodes, (node) => Math.hypot(node.x - centerX, node.y - centerY) + node.radius) ?? 88;
+    const radiusX = Math.max(104, Math.min(420, maxDistance + 88 + clusterNodes.length * 18));
+    const radiusY = Math.max(82, Math.min(300, maxDistance * 0.72 + 72 + clusterNodes.length * 12));
+    const rawPoints =
+      clusterNodes.length > 1
+        ? clusterNodes.flatMap((node, nodeIndex) => islandBlobPoints(node.x, node.y, node.radius + 62, node.radius + 48, index * 19 + nodeIndex, 10))
+        : islandBlobPoints(centerX, centerY, radiusX, radiusY, index * 17 + 3, 18);
+    const polygon = polygonFromPoints(rawPoints);
+
+    return {
+      id,
+      color: cluster?.color ?? clusterNodes[0]?.color ?? shareCardColor(index),
+      centerX,
+      centerY,
+      points: polygon.points,
+      path: polygon.path
+    };
+  });
+
+  const usedClusterIds = new Set(nodes.map((node) => node.clusterId).filter(Boolean));
+  const ambientLayouts = [
+    { x: 238, y: 348, rx: 210, ry: 94 },
+    { x: 878, y: 376, rx: 180, ry: 86 },
+    { x: 198, y: 842, rx: 174, ry: 82 },
+    { x: 862, y: 828, rx: 190, ry: 92 }
+  ];
+  const ambientClusters = [...(graph.clusters ?? [])]
+    .filter((cluster) => !usedClusterIds.has(cluster.id))
+    .map((cluster) => ({
+      cluster,
+      score: cluster.nodeIds.reduce((sum, id) => {
+        const node = nodeById.get(id);
+        return sum + (node ? graphNodeScore(node) : 0);
+      }, 0)
+    }))
+    .sort((left, right) => right.score - left.score)
+    .slice(0, Math.max(0, 5 - shapes.length));
+
+  ambientClusters.forEach(({ cluster }, index) => {
+    const layout = ambientLayouts[index % ambientLayouts.length];
+    const polygon = polygonFromPoints(islandBlobPoints(layout.x, layout.y, layout.rx, layout.ry, index * 23 + 11, 18));
+    shapes.push({
+      id: cluster.id,
+      color: cluster.color,
+      centerX: layout.x,
+      centerY: layout.y,
+      points: polygon.points,
+      path: polygon.path
+    });
+  });
+
+  return shapes;
+}
+
+function edgeColor(type: string) {
+  return "#0d7f69";
+}
+
+function renderShareCardFrame(svg: SVGSVGElement, graph: GraphResponse) {
+  const { width, height } = shareCardDimensions();
+  const scene = shareCardFrameScene(graph);
+  const bottomArtists = topGraphArtists(graph, 10);
+  const clusterById = new Map((graph.clusters ?? []).map((cluster) => [cluster.id, cluster]));
+  const nodeById = new Map(scene.nodes.map((node) => [node.id, node]));
+  const root = d3.select(svg);
+  const fontFamily = "Manrope, Aptos, Segoe UI, Arial, sans-serif";
+
+  root.selectAll("*").remove();
+  root.attr("viewBox", `0 0 ${width} ${height}`).attr("width", width).attr("height", height).attr("overflow", "hidden");
+
+  const defs = root.append("defs");
+  defs.append("clipPath").attr("id", "share-card-graph-content").append("rect").attr("x", 72).attr("y", 210).attr("width", 936).attr("height", 720).attr("rx", 54);
+  defs.append("clipPath").attr("id", "share-card-bottom-content").append("rect").attr("x", 90).attr("y", 1096).attr("width", 900).attr("height", 176).attr("rx", 18);
+  defs
+    .append("linearGradient")
+    .attr("id", "share-bg")
+    .attr("x1", "0")
+    .attr("y1", "0")
+    .attr("x2", "1")
+    .attr("y2", "1")
+    .call((gradient) => {
+      gradient.append("stop").attr("offset", "0").attr("stop-color", "#fffdf7");
+      gradient.append("stop").attr("offset", "0.58").attr("stop-color", "#f4f1ea");
+      gradient.append("stop").attr("offset", "1").attr("stop-color", "#e8f2ef");
+    });
+
+  root.append("rect").attr("width", width).attr("height", height).attr("fill", "url(#share-bg)");
+  root.append("circle").attr("cx", width - 90).attr("cy", 92).attr("r", 230).attr("fill", "#2f6fbd").attr("opacity", 0.08);
+  root.append("circle").attr("cx", 38).attr("cy", height - 76).attr("r", 255).attr("fill", "#d79b28").attr("opacity", 0.13);
+
+  const dots = Array.from({ length: 34 }, (_, index) => ({
+    x: 58 + ((index * 149) % (width - 116)),
+    y: 230 + ((index * 97) % 900),
+    r: 7 + (index % 5) * 4,
+    color: ["#1f8a70", "#cf4b3f", "#2f6fbd", "#d79b28"][index % 4]
+  }));
+  root
+    .append("g")
+    .selectAll("circle")
+    .data(dots)
+    .enter()
+    .append("circle")
+    .attr("cx", (dot) => dot.x)
+    .attr("cy", (dot) => dot.y)
+    .attr("r", (dot) => dot.r)
+    .attr("fill", (dot) => dot.color)
+    .attr("opacity", 0.06);
+
+  const text = (value: string, x: number, y: number, size: number, weight = 800, fill = "#121416") =>
+    root
+      .append("text")
+      .attr("x", x)
+      .attr("y", y)
+      .attr("fill", fill)
+      .attr("font-family", fontFamily)
+      .attr("font-size", size)
+      .attr("font-weight", weight)
+      .attr("letter-spacing", 0)
+      .text(value);
+
+  text("Моя музыкальная карта", 90, 118, 52, 950, "#121416");
+  text(scene.title, 92, 162, 24, 950, "#0d5f50");
+
+  const graphGroup = root.append("g").attr("class", "share-d3-frame");
+  graphGroup
+    .append("rect")
+    .attr("x", 72)
+    .attr("y", 210)
+    .attr("width", 936)
+    .attr("height", 720)
+    .attr("rx", 54)
+    .attr("fill", "#fffdf7")
+    .attr("opacity", 0.58)
+    .attr("stroke", "#d9e0df");
+
+  graphGroup
+    .append("text")
+    .attr("x", 110)
+    .attr("y", 258)
+    .attr("fill", "#364040")
+    .attr("font-family", fontFamily)
+    .attr("font-size", 23)
+    .attr("font-weight", 850)
+    .text(scene.subtitle);
+
+  const centerX = d3.mean(scene.nodes, (node) => node.x) ?? 540;
+  const centerY = d3.mean(scene.nodes, (node) => node.y) ?? 620;
+  const graphContent = graphGroup.append("g").attr("clip-path", "url(#share-card-graph-content)");
+  const islandShapes = shareCardIslandShapes(graph, scene.nodes);
+
+  islandShapes.forEach((shape, shapeIndex) => {
+    graphContent
+      .append("path")
+      .attr("d", shape.path)
+      .attr("fill", shape.color)
+      .attr("opacity", shapeIndex === 0 ? 0.18 : 0.12);
+
+    graphContent
+      .append("path")
+      .attr("d", shape.path)
+      .attr("fill", "none")
+      .attr("stroke", shape.color)
+      .attr("stroke-width", shapeIndex === 0 ? 4 : 2.5)
+      .attr("stroke-linejoin", "round")
+      .attr("stroke-linecap", "round")
+      .attr("stroke-opacity", shapeIndex === 0 ? 0.34 : 0.22);
+  });
+
+  graphContent
+    .append("g")
+    .selectAll("line")
+    .data(scene.edges)
+    .enter()
+    .append("line")
+    .attr("x1", (edge) => nodeById.get(edge.source)?.x ?? 0)
+    .attr("y1", (edge) => nodeById.get(edge.source)?.y ?? 0)
+    .attr("x2", (edge) => nodeById.get(edge.target)?.x ?? 0)
+    .attr("y2", (edge) => nodeById.get(edge.target)?.y ?? 0)
+    .attr("stroke", (edge) => edgeColor(edge.type))
+    .attr("stroke-width", (edge) => Math.max(4, Math.min(13, edge.weight * 2.5)))
+    .attr("stroke-linecap", "round")
+    .attr("opacity", (edge) => (edge.type === "preview" ? 0.28 : 0.52));
+
+  const nodeGroups = graphGroup
+    .append("g")
+    .attr("clip-path", "url(#share-card-graph-content)")
+    .selectAll<SVGGElement, ShareCardFrameNode>("g")
+    .data(scene.nodes)
+    .enter()
+    .append("g")
+    .attr("transform", (node) => `translate(${node.x},${node.y})`);
+
+  nodeGroups
+    .append("circle")
+    .attr("r", (node) => node.radius + 12)
+    .attr("fill", (node) => node.color)
+    .attr("opacity", 0.16);
+  nodeGroups.append("circle").attr("r", (node) => node.radius).attr("fill", (node) => node.color);
+
+  nodeGroups.each(function addAvatar(node, index) {
+    const group = d3.select(this);
+    const clipId = `share-card-avatar-${index}-${node.id.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+    defs.append("clipPath").attr("id", clipId).append("circle").attr("r", node.radius - 7);
+    if (node.image) {
+      group
+        .append("image")
+        .attr("href", node.image)
+        .attr("xlink:href", node.image)
+        .attr("x", -node.radius + 7)
+        .attr("y", -node.radius + 7)
+        .attr("width", (node.radius - 7) * 2)
+        .attr("height", (node.radius - 7) * 2)
+        .attr("clip-path", `url(#${clipId})`)
+        .attr("preserveAspectRatio", "xMidYMid slice");
+    } else {
+      group
+        .append("text")
+        .attr("text-anchor", "middle")
+        .attr("dy", "0.34em")
+        .attr("fill", "#fffdf7")
+        .attr("font-family", fontFamily)
+        .attr("font-size", Math.max(24, node.radius * 0.52))
+        .attr("font-weight", 950)
+        .text(artistInitials(node.name));
+    }
+  });
+
+  nodeGroups
+    .append("circle")
+    .attr("r", (node) => node.radius)
+    .attr("fill", "none")
+    .attr("stroke", "#fffdf7")
+    .attr("stroke-width", 8);
+
+  nodeGroups
+    .append("text")
+    .attr("x", 0)
+    .attr("y", (node) => (node.y < centerY || node.y > 790 ? -node.radius - 18 : node.radius + 34))
+    .attr("fill", "#121416")
+    .attr("font-family", fontFamily)
+    .attr("font-size", (node, index) => (index === 0 ? 25 : 20))
+    .attr("font-weight", 950)
+    .attr("text-anchor", (node) => (node.x < 220 ? "start" : node.x > 860 ? "end" : "middle"))
+    .text((node, index) => clampText(node.name, index === 0 ? 15 : 11));
+
+  const metricGroup = root.append("g").attr("transform", "translate(90 985)");
+  metricGroup.append("rect").attr("x", 0).attr("y", -70).attr("width", 900).attr("height", 126).attr("rx", 36).attr("fill", "#121416").attr("opacity", 0.94);
+  [
+    [42, graph.nodes.length, "Артистов в карте"],
+    [340, graph.edges.length, "Музыкальных связей"],
+    [660, graph.clusters?.length ?? 0, "Островов"]
+  ].forEach(([x, value, label]) => {
+    metricGroup.append("text").attr("x", x).attr("y", -10).attr("fill", "#fffdf7").attr("font-family", fontFamily).attr("font-size", 50).attr("font-weight", 950).text(formatCompactNumber(value as number));
+    metricGroup.append("text").attr("x", x).attr("y", 29).attr("fill", "#d9e0df").attr("font-family", fontFamily).attr("font-size", 23).attr("font-weight", 850).text(label as string);
+  });
+
+  text("Топ-10 по количеству знакомых треков", 96, 1080, 30, 950, "#0d5f50");
+
+  const artistGroup = root
+    .append("g")
+    .attr("clip-path", "url(#share-card-bottom-content)")
+    .append("g")
+    .attr("transform", "translate(92 1130)");
+  bottomArtists.forEach((artist, index) => {
+    const x = (index % 5) * 178;
+    const y = Math.floor(index / 5) * 64;
+    const color = shareCardColor(index, artist.clusterId ? clusterById.get(artist.clusterId)?.color : undefined);
+    const row = artistGroup.append("g").attr("transform", `translate(${x} ${y})`);
+    const clipId = `share-card-bottom-avatar-${index}-${artist.id.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+    const textClipId = `share-card-bottom-text-${index}-${artist.id.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+    row.append("rect").attr("x", 0).attr("y", -28).attr("width", 168).attr("height", 56).attr("rx", 18).attr("fill", color).attr("opacity", 0.12);
+    row.append("text").attr("x", 18).attr("y", 7).attr("text-anchor", "middle").attr("fill", color).attr("font-family", fontFamily).attr("font-size", 16).attr("font-weight", 950).text(index + 1);
+    row.append("circle").attr("cx", 50).attr("cy", 0).attr("r", 24).attr("fill", color).attr("opacity", 0.22);
+    defs.append("clipPath").attr("id", clipId).append("circle").attr("cx", 50).attr("cy", 0).attr("r", 20);
+    defs.append("clipPath").attr("id", textClipId).append("rect").attr("x", 78).attr("y", -24).attr("width", 82).attr("height", 48).attr("rx", 4);
+    if (artist.image) {
+      row
+        .append("image")
+        .attr("href", artist.image)
+        .attr("xlink:href", artist.image)
+        .attr("x", 30)
+        .attr("y", -20)
+        .attr("width", 40)
+        .attr("height", 40)
+        .attr("clip-path", `url(#${clipId})`)
+        .attr("preserveAspectRatio", "xMidYMid slice");
+    } else {
+      row
+        .append("text")
+        .attr("x", 50)
+        .attr("y", 8)
+        .attr("text-anchor", "middle")
+        .attr("fill", "#fffdf7")
+        .attr("font-family", fontFamily)
+        .attr("font-size", 16)
+        .attr("font-weight", 950)
+        .text(artistInitials(artist.name));
+    }
+    row.append("circle").attr("cx", 50).attr("cy", 0).attr("r", 21).attr("fill", "none").attr("stroke", "#fffdf7").attr("stroke-width", 4);
+    const labelGroup = row.append("g").attr("clip-path", `url(#${textClipId})`);
+    labelGroup.append("text").attr("x", 78).attr("y", -4).attr("fill", "#121416").attr("font-family", fontFamily).attr("font-size", 15).attr("font-weight", 950).text(clampText(artist.name, 9));
+    labelGroup.append("text").attr("x", 78).attr("y", 18).attr("fill", "#68707a").attr("font-family", fontFamily).attr("font-size", 13).attr("font-weight", 850).text(`${formatCompactNumber(graphNodeScore(artist))} треков`);
+  });
+
+  const footerTitle = root
+    .append("text")
+    .attr("x", width / 2)
+    .attr("y", height - 62)
+    .attr("fill", "#0d5f50")
+    .attr("font-family", fontFamily)
+    .attr("font-size", 26)
+    .attr("font-weight", 950)
+    .attr("text-anchor", "middle")
+    .attr("letter-spacing", 0);
+  footerTitle.append("tspan").text("Пересечение с друзьями");
+  footerTitle.append("tspan").text(" • ");
+  footerTitle.append("tspan").text("Карта музыки");
+  footerTitle.append("tspan").text(" • ");
+  footerTitle.append("tspan").text("Острова");
+  footerTitle.append("tspan").text(" • ");
+  footerTitle.append("tspan").text("Топ артистов");
+  text("Music Graph • Неофициальный эксперимент поверх Яндекс Музыки", width / 2, height - 34, 18, 750, "#8a8f93").attr("text-anchor", "middle");
+}
+
+function sharePostCaption(graph: GraphResponse) {
+  const topArtists = topGraphArtists(graph, 10).map((node) => node.name).join(", ");
+  return [
+    `Моя музыкальная карта: ${formatCompactNumber(graph.nodes.length)} артистов, ${formatCompactNumber(graph.edges.length)} связей, ${formatCompactNumber(graph.clusters?.length ?? 0)} островов.`,
+    topArtists ? `Топ-10 по знакомым трекам: ${topArtists}.` : null
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+async function blobToDataUrl(blob: Blob) {
+  return await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error ?? new Error("Не удалось прочитать изображение"));
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function imageBlobToPngDataUrl(blob: Blob) {
+  const url = URL.createObjectURL(blob);
+  const image = new Image();
+  image.decoding = "async";
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      image.onload = () => resolve();
+      image.onerror = () => reject(new Error("image decode failed"));
+      image.src = url;
+    });
+
+    const maxSize = 512;
+    const naturalWidth = image.naturalWidth || maxSize;
+    const naturalHeight = image.naturalHeight || maxSize;
+    const scale = Math.min(1, maxSize / Math.max(naturalWidth, naturalHeight));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(naturalWidth * scale));
+    canvas.height = Math.max(1, Math.round(naturalHeight * scale));
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("Canvas недоступен");
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL("image/png");
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+async function fetchShareImageBlob(href: string) {
+  try {
+    const response = await fetch(href, { mode: "cors" });
+    if (response.ok) return await response.blob();
+  } catch {
+    // Fall back to the local API proxy below.
+  }
+
+  const headers = new Headers();
+  const token = getToken();
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  const proxyResponse = await fetch(`${API_BASE_URL}/media/image?url=${encodeURIComponent(href)}`, { headers });
+  if (!proxyResponse.ok) throw new Error("image fetch failed");
+  return await proxyResponse.blob();
+}
+
+async function cloneSvgWithInlineImages(svg: SVGSVGElement) {
+  const clone = svg.cloneNode(true) as SVGSVGElement;
+  clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+  clone.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
+  const images = Array.from(clone.querySelectorAll("image"));
+  await Promise.all(
+    images.map(async (image) => {
+      const href = image.getAttribute("href") ?? image.getAttribute("xlink:href");
+      if (!href || href.startsWith("data:")) return;
+      try {
+        const blob = await fetchShareImageBlob(href);
+        const dataUrl = await imageBlobToPngDataUrl(blob).catch(() => blobToDataUrl(blob));
+        image.setAttribute("href", dataUrl);
+        image.setAttribute("xlink:href", dataUrl);
+      } catch {
+        image.remove();
+      }
+    })
+  );
+  return clone;
+}
+
+function svgSourceToDataUrl(source: string) {
+  const bytes = new TextEncoder().encode(source);
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    binary += String.fromCharCode(...bytes.slice(index, index + chunkSize));
+  }
+  return `data:image/svg+xml;base64,${window.btoa(binary)}`;
+}
+
+async function loadShareSvgImage(source: string) {
+  const image = new Image();
+  image.decoding = "async";
+  const blobUrl = URL.createObjectURL(new Blob([source], { type: "image/svg+xml;charset=utf-8" }));
+  try {
+    await new Promise<void>((resolve, reject) => {
+      image.onload = () => resolve();
+      image.onerror = () => reject(new Error("blob svg load failed"));
+      image.src = blobUrl;
+    });
+    return image;
+  } catch {
+    URL.revokeObjectURL(blobUrl);
+  }
+
+  const fallbackImage = new Image();
+  fallbackImage.decoding = "async";
+  await new Promise<void>((resolve, reject) => {
+    fallbackImage.onload = () => resolve();
+    fallbackImage.onerror = () => reject(new Error("Не удалось собрать PNG"));
+    fallbackImage.src = svgSourceToDataUrl(source);
+  });
+  return fallbackImage;
+}
+
+async function shareFramePngBlob(svg: SVGSVGElement) {
+  const { width, height } = shareCardDimensions();
+  const clone = await cloneSvgWithInlineImages(svg);
+  const source = new XMLSerializer().serializeToString(clone);
+  const image = await loadShareSvgImage(source);
+
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("Canvas недоступен");
+  context.drawImage(image, 0, 0, width, height);
+
+  return await new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob((pngBlob) => {
+      if (!pngBlob) {
+        reject(new Error("Не удалось сохранить PNG"));
+        return;
+      }
+      resolve(pngBlob);
+    }, "image/png");
+  });
+}
+
+async function downloadShareFramePng(svg: SVGSVGElement, user: User) {
+  const pngBlob = await shareFramePngBlob(svg);
+  const pngUrl = URL.createObjectURL(pngBlob);
+  const link = document.createElement("a");
+  const safeLogin = user.display_login.replace(/[^a-zA-Z0-9а-яА-ЯёЁ_-]+/g, "_");
+  link.href = pngUrl;
+  link.download = `music-graph-share-${safeLogin}.png`;
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(pngUrl), 1200);
+}
+
+async function copyShareFramePng(svg: SVGSVGElement) {
+  if (!navigator.clipboard?.write || typeof ClipboardItem === "undefined") {
+    throw new Error("Браузер не поддерживает копирование изображения");
+  }
+  const pngBlob = await shareFramePngBlob(svg);
+  await navigator.clipboard.write([new ClipboardItem({ [pngBlob.type]: pngBlob })]);
+}
+
+async function canvasToPngBlob(canvas: HTMLCanvasElement) {
+  return await new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob((pngBlob) => {
+      if (!pngBlob) {
+        reject(new Error("Не удалось сохранить PNG"));
+        return;
+      }
+      resolve(pngBlob);
+    }, "image/png");
+  });
+}
+
+async function downloadShareCanvasPng(canvas: HTMLCanvasElement, user: User) {
+  const pngBlob = await canvasToPngBlob(canvas);
+  const pngUrl = URL.createObjectURL(pngBlob);
+  const link = document.createElement("a");
+  const safeLogin = user.display_login.replace(/[^a-zA-Z0-9а-яА-ЯёЁ_-]+/g, "_");
+  link.href = pngUrl;
+  link.download = `music-graph-share-${safeLogin}.png`;
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(pngUrl), 1200);
+}
+
+async function copyShareCanvasPng(canvas: HTMLCanvasElement) {
+  if (!navigator.clipboard?.write || typeof ClipboardItem === "undefined") {
+    throw new Error("Браузер не поддерживает копирование изображения");
+  }
+  const pngBlob = await canvasToPngBlob(canvas);
+  await navigator.clipboard.write([new ClipboardItem({ [pngBlob.type]: pngBlob })]);
+}
+
+function canvasFont(size: number, weight: number, family: string) {
+  return `${weight} ${size}px ${family}`;
+}
+
+function drawRoundRect(ctx: CanvasRenderingContext2D, x: number, y: number, width: number, height: number, radius: number) {
+  ctx.beginPath();
+  ctx.roundRect(x, y, width, height, radius);
+}
+
+function drawCanvasText(
+  ctx: CanvasRenderingContext2D,
+  value: string,
+  x: number,
+  y: number,
+  size: number,
+  weight: number,
+  fill: string,
+  fontFamily: string,
+  align: CanvasTextAlign = "left"
+) {
+  ctx.save();
+  ctx.fillStyle = fill;
+  ctx.font = canvasFont(size, weight, fontFamily);
+  ctx.textAlign = align;
+  ctx.textBaseline = "alphabetic";
+  ctx.fillText(value, x, y);
+  ctx.restore();
+}
+
+async function loadShareCanvasImage(src?: string | null) {
+  if (!src) return null;
+  try {
+    const blob = await fetchShareImageBlob(src);
+    const url = URL.createObjectURL(blob);
+    const image = new Image();
+    image.decoding = "async";
+    await new Promise<void>((resolve, reject) => {
+      image.onload = () => resolve();
+      image.onerror = () => reject(new Error("image load failed"));
+      image.src = url;
+    });
+    return { image, url };
+  } catch {
+    return null;
+  }
+}
+
+function drawImageCircle(
+  ctx: CanvasRenderingContext2D,
+  image: HTMLImageElement,
+  x: number,
+  y: number,
+  radius: number
+) {
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(x, y, radius, 0, Math.PI * 2);
+  ctx.clip();
+  ctx.drawImage(image, x - radius, y - radius, radius * 2, radius * 2);
+  ctx.restore();
+}
+
+async function renderShareCardCanvas(canvas: HTMLCanvasElement, graph: GraphResponse) {
+  const { width, height } = shareCardDimensions();
+  const scene = shareCardFrameScene(graph);
+  const bottomArtists = topGraphArtists(graph, 10);
+  const clusterById = new Map((graph.clusters ?? []).map((cluster) => [cluster.id, cluster]));
+  const nodeById = new Map(scene.nodes.map((node) => [node.id, node]));
+  const fontFamily = "Manrope, Aptos, Segoe UI, Arial, sans-serif";
+  const imageUrls: string[] = [];
+
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Canvas недоступен");
+  ctx.clearRect(0, 0, width, height);
+
+  const bg = ctx.createLinearGradient(0, 0, width, height);
+  bg.addColorStop(0, "#fffdf7");
+  bg.addColorStop(0.58, "#f4f1ea");
+  bg.addColorStop(1, "#e8f2ef");
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, width, height);
+
+  ctx.save();
+  ctx.globalAlpha = 0.08;
+  ctx.fillStyle = "#2f6fbd";
+  ctx.beginPath();
+  ctx.arc(width - 90, 92, 230, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 0.13;
+  ctx.fillStyle = "#d79b28";
+  ctx.beginPath();
+  ctx.arc(38, height - 76, 255, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  Array.from({ length: 34 }, (_, index) => ({
+    x: 58 + ((index * 149) % (width - 116)),
+    y: 230 + ((index * 97) % 900),
+    r: 7 + (index % 5) * 4,
+    color: ["#1f8a70", "#cf4b3f", "#2f6fbd", "#d79b28"][index % 4]
+  })).forEach((dot) => {
+    ctx.save();
+    ctx.globalAlpha = 0.06;
+    ctx.fillStyle = dot.color;
+    ctx.beginPath();
+    ctx.arc(dot.x, dot.y, dot.r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  });
+
+  drawCanvasText(ctx, "Моя музыкальная карта", 90, 118, 52, 950, "#121416", fontFamily);
+  drawCanvasText(ctx, scene.title, 92, 162, 24, 950, "#0d5f50", fontFamily);
+
+  drawRoundRect(ctx, 72, 210, 936, 720, 54);
+  ctx.fillStyle = "rgba(255, 253, 247, 0.58)";
+  ctx.fill();
+  ctx.strokeStyle = "#d9e0df";
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  drawCanvasText(ctx, scene.subtitle, 110, 258, 23, 850, "#364040", fontFamily);
+
+  ctx.save();
+  drawRoundRect(ctx, 72, 210, 936, 720, 54);
+  ctx.clip();
+  shareCardIslandShapes(graph, scene.nodes).forEach((shape, shapeIndex) => {
+    const path = new Path2D(shape.path);
+    ctx.save();
+    ctx.globalAlpha = shapeIndex === 0 ? 0.18 : 0.12;
+    ctx.fillStyle = shape.color;
+    ctx.fill(path);
+    ctx.globalAlpha = shapeIndex === 0 ? 0.34 : 0.22;
+    ctx.strokeStyle = shape.color;
+    ctx.lineWidth = shapeIndex === 0 ? 4 : 2.5;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.stroke(path);
+    ctx.restore();
+  });
+
+  scene.edges.forEach((edge) => {
+    const source = nodeById.get(edge.source);
+    const target = nodeById.get(edge.target);
+    if (!source || !target) return;
+    ctx.save();
+    ctx.globalAlpha = edge.type === "preview" ? 0.28 : 0.52;
+    ctx.strokeStyle = edgeColor(edge.type);
+    ctx.lineWidth = Math.max(4, Math.min(13, edge.weight * 2.5));
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.moveTo(source.x, source.y);
+    ctx.lineTo(target.x, target.y);
+    ctx.stroke();
+    ctx.restore();
+  });
+
+  const centerY = d3.mean(scene.nodes, (node) => node.y) ?? 620;
+  for (const [index, node] of scene.nodes.entries()) {
+    ctx.save();
+    ctx.globalAlpha = 0.16;
+    ctx.fillStyle = node.color;
+    ctx.beginPath();
+    ctx.arc(node.x, node.y, node.radius + 12, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    ctx.fillStyle = node.color;
+    ctx.beginPath();
+    ctx.arc(node.x, node.y, node.radius, 0, Math.PI * 2);
+    ctx.fill();
+
+    const loaded = await loadShareCanvasImage(node.image);
+    if (loaded) {
+      imageUrls.push(loaded.url);
+      drawImageCircle(ctx, loaded.image, node.x, node.y, node.radius - 7);
+    } else {
+      drawCanvasText(ctx, artistInitials(node.name), node.x, node.y + node.radius * 0.18, Math.max(24, node.radius * 0.52), 950, "#fffdf7", fontFamily, "center");
+    }
+
+    ctx.strokeStyle = "#fffdf7";
+    ctx.lineWidth = 8;
+    ctx.beginPath();
+    ctx.arc(node.x, node.y, node.radius, 0, Math.PI * 2);
+    ctx.stroke();
+
+    const labelY = node.y < centerY || node.y > 790 ? node.y - node.radius - 18 : node.y + node.radius + 34;
+    const align: CanvasTextAlign = node.x < 220 ? "left" : node.x > 860 ? "right" : "center";
+    drawCanvasText(ctx, clampText(node.name, index === 0 ? 15 : 11), node.x, labelY, index === 0 ? 25 : 20, 950, "#121416", fontFamily, align);
+  }
+  ctx.restore();
+
+  drawRoundRect(ctx, 90, 915, 900, 126, 36);
+  ctx.fillStyle = "rgba(18, 20, 22, 0.94)";
+  ctx.fill();
+  [
+    [132, graph.nodes.length, "Артистов в карте"],
+    [430, graph.edges.length, "Музыкальных связей"],
+    [750, graph.clusters?.length ?? 0, "Островов"]
+  ].forEach(([x, value, label]) => {
+    drawCanvasText(ctx, formatCompactNumber(value as number), x as number, 975, 50, 950, "#fffdf7", fontFamily);
+    drawCanvasText(ctx, label as string, x as number, 1014, 23, 850, "#d9e0df", fontFamily);
+  });
+
+  drawCanvasText(ctx, "Топ-10 по количеству знакомых треков", 96, 1080, 30, 950, "#0d5f50", fontFamily);
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(90, 1096, 900, 176);
+  ctx.clip();
+  for (const [index, artist] of bottomArtists.entries()) {
+    const x = 92 + (index % 5) * 178;
+    const y = 1130 + Math.floor(index / 5) * 64;
+    const color = shareCardColor(index, artist.clusterId ? clusterById.get(artist.clusterId)?.color : undefined);
+    ctx.save();
+    ctx.globalAlpha = 0.12;
+    drawRoundRect(ctx, x, y - 28, 168, 56, 18);
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.restore();
+    drawCanvasText(ctx, String(index + 1), x + 18, y + 7, 16, 950, color, fontFamily, "center");
+    ctx.save();
+    ctx.globalAlpha = 0.22;
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(x + 50, y, 24, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    const loaded = await loadShareCanvasImage(artist.image);
+    if (loaded) {
+      imageUrls.push(loaded.url);
+      drawImageCircle(ctx, loaded.image, x + 50, y, 20);
+    } else {
+      drawCanvasText(ctx, artistInitials(artist.name), x + 50, y + 8, 16, 950, "#fffdf7", fontFamily, "center");
+    }
+    ctx.strokeStyle = "#fffdf7";
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.arc(x + 50, y, 21, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(x + 78, y - 24, 82, 48);
+    ctx.clip();
+    drawCanvasText(ctx, clampText(artist.name, 9), x + 78, y - 4, 15, 950, "#121416", fontFamily);
+    drawCanvasText(ctx, `${formatCompactNumber(graphNodeScore(artist))} треков`, x + 78, y + 18, 13, 850, "#68707a", fontFamily);
+    ctx.restore();
+  }
+  ctx.restore();
+
+  ctx.save();
+  ctx.textAlign = "center";
+  drawCanvasText(ctx, "Пересечение с друзьями • Карта музыки • Острова • Топ артистов", width / 2, height - 62, 26, 950, "#0d5f50", fontFamily, "center");
+  drawCanvasText(ctx, "Music Graph • Неофициальный эксперимент поверх Яндекс Музыки", width / 2, height - 34, 18, 750, "#8a8f93", fontFamily, "center");
+  ctx.restore();
+  imageUrls.forEach((url) => URL.revokeObjectURL(url));
+}
+
+function ShareCardModal({
+  graph,
+  user,
+  onClose
+}: {
+  graph: GraphResponse;
+  user: User;
+  onClose: () => void;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [caption, setCaption] = useState(() => sharePostCaption(graph));
+  const [status, setStatus] = useState<string | null>(null);
+
+  useEffect(() => {
+    setCaption(sharePostCaption(graph));
+  }, [graph]);
+
+  useEffect(() => {
+    if (!canvasRef.current) return;
+    let cancelled = false;
+    renderShareCardCanvas(canvasRef.current, graph).catch((error) => {
+      if (!cancelled) {
+        setStatus(error instanceof Error ? error.message : "Не удалось отрисовать карточку");
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [graph]);
+
+  useEffect(() => {
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
+  async function handleDownload() {
+    if (!canvasRef.current) return;
+    setStatus("Собираю PNG...");
+    try {
+      await downloadShareCanvasPng(canvasRef.current, user);
+      setStatus("PNG готов");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Не удалось скачать PNG");
+    }
+  }
+
+  async function handleCopyImage() {
+    if (!canvasRef.current) return;
+    setStatus("Копирую изображение...");
+    try {
+      await copyShareCanvasPng(canvasRef.current);
+      setStatus("Изображение скопировано");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Не удалось скопировать изображение");
+    }
+  }
+
+  async function handleCopyText() {
+    try {
+      await navigator.clipboard.writeText(caption);
+      setStatus("Текст скопирован");
+    } catch {
+      setStatus("Не удалось скопировать текст");
+    }
+  }
+
+  return (
+    <div className="share-modal-backdrop" role="presentation" onMouseDown={onClose}>
+      <section
+        aria-label="Поделиться результатом"
+        aria-modal="true"
+        className="share-modal"
+        onMouseDown={(event) => event.stopPropagation()}
+        role="dialog"
+      >
+        <div className="share-modal-header">
+          <div>
+            <p className="eyebrow">Шаринг</p>
+            <h2>Поделиться своим результатом</h2>
+          </div>
+          <button className="icon-button" onClick={onClose} type="button" aria-label="Закрыть">
+            <X size={18} />
+          </button>
+        </div>
+        <div className="share-modal-grid">
+          <div className="share-frame-shell">
+            <canvas ref={canvasRef} role="img" aria-label="share card preview" />
+          </div>
+          <aside className="share-post-editor">
+            <label>
+              <span>Текст поста</span>
+              <textarea value={caption} onChange={(event) => setCaption(event.target.value)} />
+            </label>
+            <div className="share-modal-actions">
+              <button className="primary-action" onClick={() => void handleDownload()} type="button">
+                <Download size={18} />
+                Скачать кадр PNG
+              </button>
+              <button className="secondary-action" onClick={() => void handleCopyImage()} type="button">
+                <Copy size={18} />
+                Скопировать изображение
+              </button>
+              <button className="secondary-action" onClick={() => void handleCopyText()} type="button">
+                <Share2 size={18} />
+                Скопировать текст
+              </button>
+            </div>
+            {status && <p className="muted small">{status}</p>}
+          </aside>
+        </div>
+      </section>
+    </div>
+  );
 }
 
 function ClusterIslandsPanel({
@@ -412,7 +1591,10 @@ export function App() {
   const [hoveredClusterId, setHoveredClusterId] = useState<string | null>(null);
   const [activeClusterId, setActiveClusterId] = useState<string | null>(null);
   const [highlightIntersections, setHighlightIntersections] = useState(false);
+  const [shareModalOpen, setShareModalOpen] = useState(false);
+  const [shareGraph, setShareGraph] = useState<GraphResponse | null>(null);
   const [loadingGraph, setLoadingGraph] = useState(false);
+  const [loadingShareGraph, setLoadingShareGraph] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pendingInviteCode, setPendingInviteCode] = useState<string | null>(() => {
     return readInviteCodeFromUrl() ?? readStoredInviteCode();
@@ -473,6 +1655,11 @@ export function App() {
     commitGraphDepth(draftGraphDepth);
   }, [commitGraphDepth, commitLimit, commitMinListens, draftGraphDepth, draftLimit, draftMinListens]);
 
+  const graphControlsChanged =
+    draftLimit !== limit ||
+    draftMinListens !== minListens ||
+    draftGraphDepth !== graphDepth;
+
   const loadGraph = useCallback(async () => {
     if (!user) return;
     const requestSeq = graphRequestSeqRef.current + 1;
@@ -494,25 +1681,11 @@ export function App() {
   }, [graphParamsString, user]);
 
   const handleRefreshGraph = useCallback(() => {
-    const controlsChanged =
-      draftLimit !== limit ||
-      draftMinListens !== minListens ||
-      draftGraphDepth !== graphDepth;
-
     commitGraphControls();
-    if (!controlsChanged) {
+    if (!graphControlsChanged) {
       void loadGraph();
     }
-  }, [
-    commitGraphControls,
-    draftGraphDepth,
-    draftLimit,
-    draftMinListens,
-    graphDepth,
-    limit,
-    loadGraph,
-    minListens
-  ]);
+  }, [commitGraphControls, graphControlsChanged, loadGraph]);
 
   useEffect(() => {
     if (!user) return;
@@ -533,6 +1706,35 @@ export function App() {
     setHoveredClusterId(null);
     setActiveClusterId(null);
   }, [islandsAvailable]);
+
+  const shareGraphReady = Boolean(
+    graph &&
+      graph.nodes.length > 0 &&
+      !loadingShareGraph
+  );
+  const shareLaunchHint = !graph
+    ? "Сначала загрузи граф."
+    : loadingShareGraph
+      ? "Собираю максимум известных данных..."
+      : "Соберет карточку по максимуму известных данных.";
+
+  const openShareModal = useCallback(async () => {
+    if (!graph || graph.nodes.length === 0 || loadingShareGraph) return;
+    setLoadingShareGraph(true);
+    setError(null);
+    try {
+      const maxGraph = await api.graphMe(new URLSearchParams(SHARE_MAX_GRAPH_PARAMS));
+      if (maxGraph.nodes.length === 0) {
+        throw new Error("Нет данных для карточки");
+      }
+      setShareGraph(maxGraph);
+      setShareModalOpen(true);
+    } catch (shareError) {
+      setError(shareError instanceof Error ? shareError.message : "Не удалось собрать карточку");
+    } finally {
+      setLoadingShareGraph(false);
+    }
+  }, [graph, loadingShareGraph]);
 
   const setOverlayLoading = useCallback((friendId: string, isLoading: boolean) => {
     setLoadingOverlayIds((current) => {
@@ -716,6 +1918,8 @@ export function App() {
     clearToken();
     setUser(null);
     setGraph(null);
+    setShareGraph(null);
+    setShareModalOpen(false);
     setFriendOverlays([]);
   }
 
@@ -730,6 +1934,8 @@ export function App() {
       clearToken();
       setUser(null);
       setGraph(null);
+      setShareGraph(null);
+      setShareModalOpen(false);
       setFriendOverlays([]);
     } catch (deleteError) {
       setError(deleteError instanceof Error ? deleteError.message : "Не удалось удалить данные");
@@ -765,7 +1971,7 @@ export function App() {
       <section className="dashboard-guide" aria-label="Как читать Music Graph">
         <div>
           <p className="eyebrow">Как читать граф</p>
-          <h2>Это карта твоих артистов, коллабов и похожих музыкальных островов</h2>
+          <h2>Это карта твоих артистов: коллабы, похожие исполнители и музыкальные острова</h2>
         </div>
         <div className="dashboard-guide-grid">
           {dashboardGuide.map((item) => (
@@ -787,6 +1993,18 @@ export function App() {
             onToggleOverlayFriend={(friend) => void toggleFriendOverlay(friend)}
             onFriendRemoved={handleFriendRemoved}
           />
+          <section className="share-launch-panel">
+            <button
+              className="primary-action share-result-button"
+              disabled={!shareGraphReady}
+              onClick={() => void openShareModal()}
+              type="button"
+            >
+              <Share2 size={18} />
+              {loadingShareGraph ? "Собираю карточку" : "Поделиться результатом"}
+            </button>
+            <span>{shareLaunchHint}</span>
+          </section>
         </aside>
 
         <section className="workspace">
@@ -810,9 +2028,20 @@ export function App() {
                 value={draftLimit}
                 onBlur={(event) => commitLimit(Number(event.currentTarget.value))}
                 onChange={(event) => setDraftLimit(Number(event.target.value))}
-                onKeyUp={(event) => commitLimit(Number(event.currentTarget.value))}
-                onPointerCancel={(event) => commitLimit(Number(event.currentTarget.value))}
-                onPointerUp={(event) => commitLimit(Number(event.currentTarget.value))}
+                onKeyDown={(event) => {
+                  if (shouldCommitRangeKey(event)) {
+                    commitLimit(Number(event.currentTarget.value));
+                  }
+                }}
+                onPointerCancel={(event) => {
+                  releaseRangePointer(event);
+                  commitLimit(Number(event.currentTarget.value));
+                }}
+                onPointerDown={captureRangePointer}
+                onPointerUp={(event) => {
+                  releaseRangePointer(event);
+                  commitLimit(Number(event.currentTarget.value));
+                }}
               />
             </label>
             <label className="number-control" title="Минимум синхронизированных прослушиваний, чтобы артист попал в основу графа">
@@ -841,9 +2070,20 @@ export function App() {
                 value={draftGraphDepth}
                 onBlur={(event) => commitGraphDepth(Number(event.currentTarget.value))}
                 onChange={(event) => setDraftGraphDepth(Number(event.target.value))}
-                onKeyUp={(event) => commitGraphDepth(Number(event.currentTarget.value))}
-                onPointerCancel={(event) => commitGraphDepth(Number(event.currentTarget.value))}
-                onPointerUp={(event) => commitGraphDepth(Number(event.currentTarget.value))}
+                onKeyDown={(event) => {
+                  if (shouldCommitRangeKey(event)) {
+                    commitGraphDepth(Number(event.currentTarget.value));
+                  }
+                }}
+                onPointerCancel={(event) => {
+                  releaseRangePointer(event);
+                  commitGraphDepth(Number(event.currentTarget.value));
+                }}
+                onPointerDown={captureRangePointer}
+                onPointerUp={(event) => {
+                  releaseRangePointer(event);
+                  commitGraphDepth(Number(event.currentTarget.value));
+                }}
               />
             </label>
             <label className="slider-control force-control" title="Сила отталкивания пузырей: больше значение — артисты сильнее разъезжаются, меньше — граф плотнее">
@@ -982,6 +2222,9 @@ export function App() {
         <span>Неофициальный эксперимент поверх Яндекс Музыки: данные хранятся локально в этом проекте и удаляются кнопкой с корзиной вверху.</span>
         <span>Плейлисты создаются только после твоего подтверждения и приватными по умолчанию.</span>
       </footer>
+      {shareModalOpen && shareGraph && (
+        <ShareCardModal graph={shareGraph} user={user} onClose={() => setShareModalOpen(false)} />
+      )}
     </main>
   );
 }

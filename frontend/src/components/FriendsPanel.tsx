@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Link2, Plus, Trash2, UserPlus, Users, X } from "lucide-react";
+import { Copy, Link2, Plus, Trash2, UserPlus, Users, X } from "lucide-react";
 import { api } from "../api/client";
 import type { Friend, InviteCreateResponse } from "../types/api";
 
@@ -69,6 +69,16 @@ export function FriendsPanel({
     const created = await api.invite();
     setInvite(created);
     setMessage("Ссылка приглашения создана");
+  }
+
+  async function copyInviteLink() {
+    if (!invite) return;
+    try {
+      await navigator.clipboard.writeText(invite.invite_url);
+      setMessage("Ссылка приглашения скопирована");
+    } catch {
+      setMessage("Не удалось скопировать ссылку");
+    }
   }
 
   async function acceptInvite() {
@@ -158,6 +168,10 @@ export function FriendsPanel({
           <div className="invite-url">
             <Link2 size={15} />
             <span>{invite.invite_url}</span>
+            <button className="secondary-action compact invite-copy-button" onClick={() => void copyInviteLink()} type="button">
+              <Copy size={14} />
+              Скопировать
+            </button>
           </div>
         )}
       </div>

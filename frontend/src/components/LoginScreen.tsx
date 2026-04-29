@@ -280,10 +280,10 @@ export function LoginScreen({ onLogin }: Props) {
             видно не только что ты слушаешь, но и как музыка связана между собой.
           </p>
           <div className="visual-stats" aria-label="Основные источники графа">
-            <span>лайки</span>
-            <span>история</span>
+            <span>Лайки</span>
+            <span>История</span>
             <span>Моя волна</span>
-            <span>друзья</span>
+            <span>Друзья</span>
           </div>
         </div>
 

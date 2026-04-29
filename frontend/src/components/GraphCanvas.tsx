@@ -139,6 +139,7 @@ export function GraphCanvas({
   const svgRef = useRef<SVGSVGElement | null>(null);
   const activeClusterIdRef = useRef<string | null>(activeClusterId);
   const hoveredClusterIdRef = useRef<string | null>(hoveredClusterId);
+  const hoveredNodeClusterIdRef = useRef<string | null>(null);
   const [hovered, setHovered] = useState<GraphNode | null>(null);
   const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
   const normalizedSearch = search.trim().toLowerCase();
@@ -271,6 +272,7 @@ export function GraphCanvas({
     if (!focusedNodeId) return null;
     return visibleGraph?.nodes.find((node) => node.id === focusedNodeId) ?? null;
   }, [focusedNodeId, visibleGraph]);
+  const focusedNodeClusterId = focusedNode?.clusterId ?? null;
 
   const tooltipNode = hovered ?? focusedNode;
   const tooltipOverlayMatches = tooltipNode ? overlayMatches[tooltipNode.id] ?? [] : [];
@@ -351,7 +353,8 @@ export function GraphCanvas({
     root
       .attr("viewBox", `0 0 ${width} ${height}`)
       .classed("intersection-highlight-mode", hasIntersectionHighlight)
-      .classed("island-mode", showIslands);
+      .classed("island-mode", showIslands)
+      .classed("island-artist-hover", false);
 
     const defs = root.append("defs");
     const zoomLayer = root.append("g");
@@ -370,6 +373,8 @@ export function GraphCanvas({
     root.on("click", () => {
       setFocusedNodeId(null);
       setHovered(null);
+      hoveredNodeClusterIdRef.current = null;
+      root.classed("island-artist-hover", false);
       onHoverCluster?.(null);
       onSelectCluster?.(null);
     });
@@ -496,6 +501,7 @@ export function GraphCanvas({
           }
           return connected;
         })
+        .classed("is-context", false)
         .classed("is-dimmed", (edge) => endpointId(edge.source) !== focused.id && endpointId(edge.target) !== focused.id);
 
       node
@@ -531,31 +537,83 @@ export function GraphCanvas({
         });
     }
 
+    function previewNodeIsland(item: SimNode | null) {
+      const focusedArtistId = showIslands ? item?.id ?? focusedNode?.id ?? null : null;
+      const focusedClusterId = showIslands ? item?.clusterId ?? focusedNodeClusterId : null;
+      const islandNodeIds = new Set(focusedClusterId ? clusterById.get(focusedClusterId)?.visibleNodeIds ?? [] : []);
+      const directNodeIds = new Set<string>();
+
+      if (focusedArtistId) {
+        directNodeIds.add(focusedArtistId);
+        for (const edge of links) {
+          const source = endpointId(edge.source);
+          const target = endpointId(edge.target);
+          if (source === focusedArtistId || target === focusedArtistId) {
+            directNodeIds.add(source);
+            directNodeIds.add(target);
+          }
+        }
+      }
+
+      hoveredNodeClusterIdRef.current = focusedClusterId;
+      root.classed("island-artist-hover", Boolean(focusedArtistId && focusedClusterId));
+      islandHull.classed("is-node-hovered", (cluster) => cluster.id === hoveredNodeClusterIdRef.current);
+
+      node
+        .classed("island-focus-node", (nodeItem) => Boolean(focusedArtistId && nodeItem.id === focusedArtistId))
+        .classed("island-neighbor-node", (nodeItem) => Boolean(focusedArtistId && nodeItem.id !== focusedArtistId && directNodeIds.has(nodeItem.id)))
+        .classed(
+          "island-cluster-node",
+          (nodeItem) => Boolean(focusedArtistId && nodeItem.id !== focusedArtistId && !directNodeIds.has(nodeItem.id) && islandNodeIds.has(nodeItem.id))
+        )
+        .classed(
+          "island-outside-node",
+          (nodeItem) => Boolean(focusedArtistId && nodeItem.id !== focusedArtistId && !directNodeIds.has(nodeItem.id) && !islandNodeIds.has(nodeItem.id))
+        );
+
+      link
+        .classed("island-neighbor-link", (edge) => {
+          if (!focusedArtistId) return false;
+          const source = endpointId(edge.source);
+          const target = endpointId(edge.target);
+          return source === focusedArtistId || target === focusedArtistId;
+        })
+        .classed("island-cluster-link", (edge) => {
+          if (!focusedArtistId) return false;
+          const source = endpointId(edge.source);
+          const target = endpointId(edge.target);
+          return source !== focusedArtistId && target !== focusedArtistId && islandNodeIds.has(source) && islandNodeIds.has(target);
+        })
+        .classed("island-outside-link", (edge) => {
+          if (!focusedArtistId) return false;
+          const source = endpointId(edge.source);
+          const target = endpointId(edge.target);
+          const direct = source === focusedArtistId || target === focusedArtistId;
+          const insideIsland = islandNodeIds.has(source) && islandNodeIds.has(target);
+          return !direct && !insideIsland;
+        });
+    }
+
     node.on("mouseenter", (_, item) => {
       setHovered(item);
       focusNode(item);
-      if (showIslands && item.clusterId) {
-        onHoverCluster?.(item.clusterId);
-      }
+      previewNodeIsland(item);
     });
     node.on("mouseleave", () => {
       setHovered(null);
       focusNode(null);
-      if (showIslands) {
-        onHoverCluster?.(null);
-      }
+      previewNodeIsland(null);
     });
     node.on("click", (event, item) => {
       event.stopPropagation();
       setFocusedNodeId((current) => (current === item.id ? null : item.id));
       setHovered(item);
-      if (showIslands && item.clusterId) {
-        onSelectCluster?.(activeClusterIdRef.current === item.clusterId ? null : item.clusterId);
-      }
+      previewNodeIsland(item);
     });
 
     applyContext();
     applyIslandState();
+    previewNodeIsland(null);
 
     const avatarNodes = nodes.filter((item) => Boolean(item.image));
     const clips = defs
@@ -769,6 +827,7 @@ export function GraphCanvas({
     intersectionNodeIds,
     listenedPairKeys,
     clusterById,
+    focusedNodeClusterId,
     onHoverCluster,
     onSelectCluster,
     overlayMatches,

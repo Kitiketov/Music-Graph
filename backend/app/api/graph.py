@@ -3,7 +3,8 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_current_user
@@ -19,6 +20,30 @@ def _edge_types(value: str | None) -> set[str]:
     if not value:
         return {"collab"}
     return {item.strip() for item in value.split(",") if item.strip()}
+
+
+@router.get("/media/image")
+async def image_proxy(
+    user: Annotated[User, Depends(get_current_user)],
+    url: Annotated[str, Query(min_length=1)],
+) -> Response:
+    if not url.startswith(("https://", "http://")):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported image URL")
+
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Could not fetch image") from exc
+
+    content_type = response.headers.get("content-type", "application/octet-stream").split(";")[0].strip()
+    if not content_type.startswith("image/"):
+        raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail="URL is not an image")
+    if len(response.content) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Image is too large")
+
+    return Response(content=response.content, media_type=content_type)
 
 
 @router.get("/graph/me", response_model=GraphResponse)
