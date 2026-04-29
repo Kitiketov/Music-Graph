@@ -910,11 +910,15 @@ async function downloadShareFramePng(svg: SVGSVGElement, user: User) {
 }
 
 async function copyShareFramePng(svg: SVGSVGElement) {
-  if (!navigator.clipboard?.write || typeof ClipboardItem === "undefined") {
+  if (!canCopyPngToClipboard()) {
     throw new Error("Браузер не поддерживает копирование изображения");
   }
   const pngBlob = await shareFramePngBlob(svg);
   await navigator.clipboard.write([new ClipboardItem({ [pngBlob.type]: pngBlob })]);
+}
+
+function canCopyPngToClipboard() {
+  return window.isSecureContext && Boolean(navigator.clipboard?.write) && typeof ClipboardItem !== "undefined";
 }
 
 async function canvasToPngBlob(canvas: HTMLCanvasElement) {
@@ -941,7 +945,7 @@ async function downloadShareCanvasPng(canvas: HTMLCanvasElement, user: User) {
 }
 
 async function copyShareCanvasPng(canvas: HTMLCanvasElement) {
-  if (!navigator.clipboard?.write || typeof ClipboardItem === "undefined") {
+  if (!canCopyPngToClipboard()) {
     throw new Error("Браузер не поддерживает копирование изображения");
   }
   const pngBlob = await canvasToPngBlob(canvas);
@@ -1218,12 +1222,53 @@ function ShareCardModal({
   onClose: () => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const frameShellRef = useRef<HTMLDivElement | null>(null);
   const [caption, setCaption] = useState(() => sharePostCaption(graph));
   const [status, setStatus] = useState<string | null>(null);
+  const [previewSize, setPreviewSize] = useState<{ width: number; height: number } | null>(null);
 
   useEffect(() => {
     setCaption(sharePostCaption(graph));
   }, [graph]);
+
+  useEffect(() => {
+    const shell = frameShellRef.current;
+    if (!shell) return;
+
+    const { width: cardWidth, height: cardHeight } = shareCardDimensions();
+    let animationFrame = 0;
+
+    const measure = () => {
+      const rect = shell.getBoundingClientRect();
+      const styles = window.getComputedStyle(shell);
+      const horizontalPadding = Number.parseFloat(styles.paddingLeft) + Number.parseFloat(styles.paddingRight);
+      const verticalPadding = Number.parseFloat(styles.paddingTop) + Number.parseFloat(styles.paddingBottom);
+      const availableWidth = Math.max(1, rect.width - horizontalPadding);
+      const availableHeight = Math.max(1, rect.height - verticalPadding);
+      const scale = Math.min(availableWidth / cardWidth, availableHeight / cardHeight, 1);
+
+      setPreviewSize({
+        width: Math.floor(cardWidth * scale),
+        height: Math.floor(cardHeight * scale)
+      });
+    };
+
+    const scheduleMeasure = () => {
+      window.cancelAnimationFrame(animationFrame);
+      animationFrame = window.requestAnimationFrame(measure);
+    };
+
+    const observer = new ResizeObserver(scheduleMeasure);
+    observer.observe(shell);
+    window.addEventListener("resize", scheduleMeasure);
+    scheduleMeasure();
+
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", scheduleMeasure);
+      window.cancelAnimationFrame(animationFrame);
+    };
+  }, []);
 
   useEffect(() => {
     if (!canvasRef.current) return;
@@ -1259,6 +1304,16 @@ function ShareCardModal({
 
   async function handleCopyImage() {
     if (!canvasRef.current) return;
+    if (!canCopyPngToClipboard()) {
+      setStatus("\u0411\u0440\u0430\u0443\u0437\u0435\u0440 \u043d\u0430 HTTP \u043d\u0435 \u0434\u0430\u0451\u0442 \u0441\u043a\u043e\u043f\u0438\u0440\u043e\u0432\u0430\u0442\u044c PNG, \u0441\u043a\u0430\u0447\u0438\u0432\u0430\u044e \u0444\u0430\u0439\u043b...");
+      try {
+        await downloadShareCanvasPng(canvasRef.current, user);
+        setStatus("\u0421\u043a\u0430\u0447\u0430\u043b PNG. \u0414\u043b\u044f \u043a\u043e\u043f\u0438\u044f \u043a\u0430\u0440\u0442\u0438\u043d\u043a\u0438 \u043d\u0443\u0436\u0435\u043d HTTPS.");
+      } catch (error) {
+        setStatus(error instanceof Error ? error.message : "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0441\u043a\u0430\u0447\u0430\u0442\u044c PNG");
+      }
+      return;
+    }
     setStatus("Копирую изображение...");
     try {
       await copyShareCanvasPng(canvasRef.current);
@@ -1296,8 +1351,13 @@ function ShareCardModal({
           </button>
         </div>
         <div className="share-modal-grid">
-          <div className="share-frame-shell">
-            <canvas ref={canvasRef} role="img" aria-label="share card preview" />
+          <div className="share-frame-shell" ref={frameShellRef}>
+            <canvas
+              ref={canvasRef}
+              role="img"
+              aria-label="share card preview"
+              style={previewSize ? { width: previewSize.width, height: previewSize.height } : undefined}
+            />
           </div>
           <aside className="share-post-editor">
             <label>
